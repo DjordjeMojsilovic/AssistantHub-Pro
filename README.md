@@ -24,21 +24,21 @@
 
 ## What is AssistantHub Pro?
 
-AssistantHub Pro turns an ESP32-S3 microcontroller into a smart desk assistant. It runs 24/7, automatically prioritizes your tasks, answers questions via AI and can be controlled via Telegram as well as a browser-based Web-UI — all running locally on the chip, no server required.
+AssistantHub Pro turns an ESP32-S3 microcontroller into a smart desk assistant. It runs 24/7, automatically prioritizes your tasks, answers questions via AI and can be controlled via Telegram as well as a browser-based Web-UI — all running locally on the chip, no server required.(Disclaimer: The whole Code is commented in german and the commands are on german too, if it bothers you: feel free to change it to whatever language you like!)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    AssistantHub Pro                         │
 │                                                             │
-│   📱 Telegram          🌐 Web-UI (Browser)                  │
-│        ↓                      ↓                            │
+│   📱 Telegram          🌐 Web-UI (Browser)                 │
+│        ↓                      ↓                             │
 │   ┌────────────────────────────────┐                        │
 │   │        ESP32-S3 Chip           │                        │
 │   │  Core 0: Network & Telegram    │                        │
 │   │  Core 1: AI & Display & Logic  │                        │
 │   └────────────────────────────────┘                        │
 │        ↓              ↓           ↓                         │
-│   📺 OLED         💾 SPIFFS    🤖 Groq API                  │
+│   📺 OLED         💾 SPIFFS    🤖 Groq API                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -206,12 +206,12 @@ Port:             COM port of your ESP32
 │  └── AI Response Delivery       └── Heap Management         │
 ├─────────────────────────────────────────────────────────────┤
 │  SPIFFS Flash                                               │
-│  └── /habits.json  →  Habit streaks (persistent)           │
+│  └── /habits.json  →  Habit streaks (persistent)            │
 ├─────────────────────────────────────────────────────────────┤
 │  Heap Management – 3-Tier System                            │
 │  Tier 1: Free AI buffer + yield loops                       │
 │  Tier 2: Pause services (Critical TLS Mode)                 │
-│  Tier 3: Diagnostics + Degraded Mode (8b instead of 70b)   │
+│  Tier 3: Diagnostics + Degraded Mode (8b instead of 70b)    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
