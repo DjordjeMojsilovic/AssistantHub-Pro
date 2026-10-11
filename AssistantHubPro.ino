@@ -1,33 +1,28 @@
 // ============================================================
-//  ASSISTANT HUB PRO - Public Release (Lite Edition)
-//  GitHub: https://github.com/YOUR_GITHUB_USERNAME/AssistantHubPro
+//  AssistantHub Pro
+//  https://github.com/DjordjeMojsilovic/AssistantHub-Pro
 //
-//  Beschreibung:
-//  Ein ESP32-S3 basierter Produktivitäts-Assistent mit:
-//  - KI-Chat via Groq API (Llama 3.1 8b / 3.3 70b)
-//  - Telegram Bot Steuerung
-//  - Web-UI via WebSocket (Port 81) + HTTP (Port 80)
-//  - Task-Priorisierungs-Algorithmus
-//  - Habit-Tracking mit Streak-Persistierung (SPIFFS)
+//  Schreibtisch-Assistent auf dem ESP32-S3:
+//  - KI-Chat über die Groq API (Llama 3.1 8b / 3.3 70b)
+//  - Steuerung per Telegram Bot
+//  - Web-UI über WebSocket (Port 81) und HTTP (Port 80)
+//  - Aufgaben mit automatischer Priorität
+//  - Habits mit Streaks, gespeichert im SPIFFS
 //  - Pomodoro-Timer
 //  - OLED Display (128x64, SSD1306)
-//  - FreeRTOS Dual-Core Architektur
+//  - FreeRTOS, Netzwerk auf Core 0, KI und Display auf Core 1
 //
-//  Hardware: Heltec ESP32-S3 WiFi Kit V3 (mit eingebautem OLED)
+//  Hardware: Heltec WiFi Kit 32 V3 (ESP32-S3, OLED eingebaut)
 //
-//  SETUP:
-//  1. Alle YOUR_* Platzhalter unten ausfüllen (Zeilen ~52-60)
-//  2. Benötigte Libraries installieren (siehe README.md)
-//  3. Board: "Heltec WiFi Kit 32 V3" in Arduino IDE auswählen
-//  4. Flash Size: 4MB, Partition Scheme: "Default 4MB with spiffs"
+//  Setup:
+//  1. YOUR_* Platzhalter im Block KONFIGURATION ausfüllen
+//  2. Libraries installieren (siehe README.md)
+//  3. Board "Heltec WiFi Kit 32 V3" wählen
+//  4. Partition Scheme "Default 4MB with spiffs"
 //
-//  HINWEIS - Lite Edition:
-//  Diese Version enthält KEINE LED-Steuerung.
-//  Für die vollständige Version mit RGB-LEDs (Breathing/Blink)
-//  siehe Branch "full-version" im Repository.
+//  Die LED-Ansteuerung ist in dieser Version auskommentiert.
 //
-//  Lizenz: MIT License
-//  Autor: YOUR_NAME | Jahr: 2026
+//  MIT License, (c) 2026 Djordje Mojsilovic
 // ============================================================
 
 #include <WiFi.h>
@@ -39,7 +34,6 @@
 #include <Adafruit_SSD1306.h>
 #include <WebServer.h>
 #include <WebSocketsServer.h>
-// [BLE-REMOVED] BLE complete removal - frees ~30-40 KB heap for AI/TLS
 #include <HTTPClient.h>
 #include <FS.h>
 #include <SPIFFS.h>
@@ -50,26 +44,18 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 
-// ───────────────────────────────────────────────────────────
-// ROOT CERTIFICATE (Cloudflare R3 for api.groq.com)
-// ───────────────────────────────────────────────────────────
-
-// ───────────────────────────────────────────────────────────
-// FORWARD DECLARATIONS (KORRIGIERT)
-// ───────────────────────────────────────────────────────────
+// --- FORWARD DECLARATIONS ---
 void wakeUpDisplay();
 void updateDisplay();
 void processTask(const String& cat, float weight, int days, const String& fachName);
 bool requestAI(int type, const String& prompt, const String& model, int telMsgId = -1);
-void saveHabits();  // [DEMO-FEATURE] Forward declaration
-void loadHabits();  // [DEMO-FEATURE] Forward declaration
+void saveHabits();
+void loadHabits();
 void triggerEventBlink();
 
-// Behebt den Fehler mit 'lastUpdate'
-unsigned long lastUpdate = 0; 
-// ───────────────────────────────────────────────────────────
+unsigned long lastUpdate = 0;
 
-// ─── KONFIGURATION ───────────────────────────────────────────
+// --- KONFIGURATION ---
 #define BOTtoken          "YOUR_TELEGRAM_BOT_TOKEN"
 #define CHAT_ID           "YOUR_TELEGRAM_CHAT_ID"
 #define GROQ_API_KEY_WEB  "YOUR_GROQ_API_KEY_WEB"
@@ -80,43 +66,43 @@ const char* password    = "YOUR_WIFI_PASSWORD";
 const char* SSIDhot     = "YOUR_HOTSPOT_SSID";
 const char* Passworthot = "YOUR_HOTSPOT_PASSWORD";
 
-// ─── HARDWARE PINS ───────────────────────────────────────────
+// --- HARDWARE PINS ---
 #define SCREEN_WIDTH   128
 #define SCREEN_HEIGHT   64
 #define OLED_RESET      21
 #define SCREEN_ADDRESS  0x3C
 #define SDA_PIN         17
 #define SCL_PIN         18
-// ─── LED PINS (Lite Edition: LEDs deaktiviert) ──────────────
+// --- LED PINS (aktuell deaktiviert) ---
 // Um LEDs zu aktivieren: Pins einkommentieren und LedController
 // Aufrufe in setup() und loop() einkommentieren.
-// #define LED_GREEN  2    // Grüne LED – Idle Breathing
-// #define LED_RED    19   // Rote LED  – Pomodoro Breathing
-// #define LED_BLUE   5    // Blaue LED – Event Blink (neuer Task etc.)
+// #define LED_GREEN  2    // Grüne LED, Idle Breathing
+// #define LED_RED    19   // Rote LED, Pomodoro Breathing
+// #define LED_BLUE   5    // Blaue LED, Event Blink (neuer Task etc.)
 // const int ledPin = 4;   // Status-LED
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// ─── NETZWERK ────────────────────────────────────────────────
+// --- NETZWERK ---
 WiFiClientSecure     client;
 UniversalTelegramBot bot(BOTtoken, client);
 WebServer            server(80);
 WebSocketsServer     webSocket(81);
 
-// [SOCKET-RESET] Persistent TLS for AI requests with periodic reset
+// Eine TLS-Verbindung für alle KI-Anfragen, wird alle RESET_SOCKET_AFTER Requests neu aufgebaut
 WiFiClientSecure     persistentAiClient;
 volatile bool        tlsHealthy = false;
 volatile int         requestCountSinceReset = 0;
-const int            RESET_SOCKET_AFTER = 15; 
+const int            RESET_SOCKET_AFTER = 15;
 
 const char* ntpServer          = "pool.ntp.org";
 const long  gmtOffset_sec      = 3600;
 const int   daylightOffset_sec = 3600;
 
-// ─── SEMAPHORE / MUTEX ───────────────────────────────────────
+// --- SEMAPHORE / MUTEX ---
 SemaphoreHandle_t displayMutex;
 SemaphoreHandle_t aiJobMutex;
 
-// ─── AI JOB ──────────────────────────────────────────────────
+// --- AI JOB ---
 #define AI_PROMPT_MAX  800
 #define AI_RESULT_MAX  5000
 #define AI_MODEL_MAX    64
@@ -129,30 +115,28 @@ struct AiJobState {
   char model [AI_MODEL_MAX];
   int  type;
   int  telMsgId;
-  char result[AI_RESULT_MAX];  // [FIX2] Static array (was char* malloc) – prevents heap fragmentation
+  char result[AI_RESULT_MAX];  // statisch, damit der Heap nicht fragmentiert
   bool pending;
   bool done;
-  bool heapWasLow;         // [LOW-HEAP-UX] true → aiTask runs aggressiveHeapCleanup()
-  bool degradedMode;       // [OPTION3] true → running with smaller model/reduced tokens
-  bool tokenReductionApplied;  // [OPTION3] true → use 300 tokens instead of 600
+  bool heapWasLow;             // aiTask räumt vor dem Request den Heap auf
+  bool degradedMode;           // kleineres Modell oder weniger Tokens
+  bool tokenReductionApplied;  // max. 300 Tokens
 } aiJob;
 
 TaskHandle_t NetworkTask = NULL;
 TaskHandle_t AITask      = NULL;
 
-// [BULLETPROOF-TIER2] Global control variables for critical TLS mode
-volatile bool tlsCriticalMode = false;          // true when MaxAllocHeap < 38KB – pause services
-volatile bool telegramTaskEnabled = true;       // false during critical TLS mode
-volatile bool webSocketTaskEnabled = true;      // false during critical TLS mode
-volatile bool networkTaskEnabled = true;        // false during critical TLS mode
+// Kritischer TLS-Modus: bei MaxAllocHeap < 38 KB werden Telegram und WebSocket pausiert
+volatile bool tlsCriticalMode = false;
+volatile bool telegramTaskEnabled = true;
+volatile bool webSocketTaskEnabled = true;
+volatile bool networkTaskEnabled = true;
 
-// [FIX-WEBUI] Boot-Benachrichtigung wird an networkTask delegiert,
-// damit setup() nicht durch TLS-Handshakes blockiert wird bevor server.handleClient() läuft.
+// Falls die Boot-Nachricht in setup() nicht rausgeht, versucht es der networkTask nochmal
 volatile bool bootNotifyPending = false;
-// [ENGINEER-FIX1] Mutex for atomic bootNotifyPending access on dual-core ESP32-S3
 portMUX_TYPE bootNotifyMutex = portMUX_INITIALIZER_UNLOCKED;
 
-// ─── TIMING & POMODORO ───────────────────────────────────────
+// --- TIMING & POMODORO ---
 volatile unsigned long lastTelegramCheck   = 0;
 volatile unsigned long lastInteractionTime = 0;
 unsigned long          lastBotClientReset  = 0;
@@ -171,7 +155,7 @@ const unsigned long    POMO_BREAK_DUR  =  5UL * 60UL * 1000UL;
 volatile bool pomoChanged  = false;
 volatile bool tasksChanged = false;
 
-// [RESTART-FIX] Safe restart handling - flag + timestamp to avoid RTOS state issues
+// /restart setzt nur das Flag, der Neustart selbst passiert in loop()
 volatile bool restartRequested = false;
 volatile unsigned long restartRequestTime = 0;
 
@@ -181,16 +165,15 @@ unsigned long lastSSUpdate = 0, lastDisplayTick = 0;
 unsigned long lastPomoWsBc = 0;
 unsigned long lastStaleChk = 0;
 
-// [V28] Letzte KI-Antwort zwischenspeichern – wenn der Browser nach einem
-// Retry gerade (re-)connected, war er zur Broadcast-Zeit noch nicht da.
-// sendStateTo() replayt sie beim WS-Connect, falls frisch genug.
+// Letzte KI-Antwort merken. Verbindet sich der Browser erst nach dem Broadcast
+// (z.B. nach einem Reconnect), schickt sendStateTo() sie nochmal.
 #define AI_RESULT_BUF_MAX  4096
-static char*  lastAiReplyBuf = nullptr;  // Dynamically allocated (4096 B only on first AI response)
+static char*  lastAiReplyBuf = nullptr;  // wird erst bei der ersten Antwort allokiert
 unsigned long lastAiReplyTime      = 0;
 bool          lastAiReplyConsumed  = true;
 
 
-// [V29-BLOCK1] LED-Controller für RGB Breathing/Blink
+// LED-Controller für Breathing und Blinken (nur mit LEDs)
 class LedController {
   struct {
     uint8_t pin;
@@ -262,7 +245,7 @@ public:
 
 static LedController ledCtrl;
 
-// [V28] Rotierende Funny-Status-Anzeige während KI arbeitet.
+// Statustexte, die während einer KI-Anfrage durchrotieren
 unsigned long lastStatusBcTime     = 0;
 int           lastStatusIdx        = -1;
 static const char* const FUNNY_STATUS[] = {
@@ -339,31 +322,26 @@ static const char* const FUNNY_STATUS[] = {
 };
 static const size_t FUNNY_STATUS_N = sizeof(FUNNY_STATUS) / sizeof(FUNNY_STATUS[0]);
 
-// [BLE-REMOVED] BLE variables removed - was using ~30-40 KB heap
-// Kept dummy bool for OLED display compatibility (still references "Bluetooth" status)
-volatile bool deviceConnected = false;  // Always false - no BLE anymore
+volatile bool deviceConnected = false;  // Rest von BLE, immer false
 
-// ─── AUFGABEN & HABITS ───────────────────────────────────────
+// --- AUFGABEN & HABITS ---
 struct Task {
   String        name;
   float         score;
-  unsigned long createdAt; 
+  unsigned long createdAt;
   bool          staleAlerted;
-  // [DEMO-FEATURE] isFakeTask flag: Wird bei /giverandtask auf true gesetzt
-  // Ermöglicht /deleterandtask um alle Demo-Tasks zu löschen
-  bool          isFakeTask = false;
+  bool          isFakeTask = false;  // Demo-Task von /giverandtask
 };
 Task         taskList[75];
 volatile int taskCount      = 0;
 int          tasksDoneToday = 0;
 
 #define MAX_HABITS 6
-// [DEMO-FEATURE] Added isFake flag for demo manipulation
-struct Habit { 
-  char name[20]; 
-  bool doneToday; 
+struct Habit {
+  char name[20];
+  bool doneToday;
   int streak;
-  bool isFake = false;  // Demo manipulation flag
+  bool isFake = false;  // für die Demo-Befehle
 };
 Habit habits[MAX_HABITS] = {
   {"Morgenroutine", false, 0},
@@ -374,14 +352,14 @@ Habit habits[MAX_HABITS] = {
   {"Coding",        false, 0}
 };
 
-// [DEMO-FEATURE] Telegram State Machine für /editallstreaks Command
+// Zustand für /editallstreaks
 enum TelegramEditState { EDIT_IDLE, EDIT_SELECT_HABIT, EDIT_INPUT_VALUE };
 volatile TelegramEditState telegramEditState = EDIT_IDLE;
 volatile int selectedHabitIndex = -1;
 
-volatile int checkedIn = 1;  // [FIX-GRAY-UI] Auto-eingecheckt beim Boot – kein Lock-Screen beim ersten Laden
+volatile int checkedIn = 1;  // nach dem Boot eingecheckt, kein Lock-Screen
 
-// ─── LED & BITMAPS ───────────────────────────────────────────
+// --- LED & BITMAPS ---
 unsigned long lastLedUpdate = 0;
 int           brightness  = 0, fadeAmount = 5;
 volatile bool isNewDataFlash = false;
@@ -394,7 +372,7 @@ const unsigned char bitmap_bt[]     PROGMEM = {0x10,0x30,0x58,0x34,0x12,0x12,0x3
 const unsigned char bitmap_search[] PROGMEM = {0x3C,0x42,0x81,0x81,0x81,0x42,0x3C,0xC0};
 
 // ============================================================
-//  HTML  –  Assistant Hub Pro UI (Bleibt unangetastet - Design ist perfekt)
+//  WEB-UI (HTML, CSS, JS)
 // ============================================================
 const char htmlPage[] PROGMEM = R"HTMLEND(
 <!DOCTYPE html>
@@ -497,7 +475,7 @@ select option{background:#13102b;color:#e2e8f0}
 .cm{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:0}
 .msg{max-width:83%;padding:10px 14px;border-radius:13px;font-size:.86rem;line-height:1.52;word-break:break-word}
 .msg.bot{background:var(--ac-bg);border:1px solid var(--ac-border);color:var(--txt);align-self:flex-start;border-bottom-left-radius:4px;white-space:pre-wrap;position:relative;padding-bottom:36px}
-/* [FINALFIXES] Copy button: unten-links, echtes Element (nicht ::before) */
+/* Copy-Button unten links */
 .msg-copy-btn{position:absolute;bottom:6px;left:8px;background:0;border:0;cursor:pointer;color:var(--ac2);font-size:1.2em;opacity:.7;transition:.15s;padding:2px 4px;z-index:10}
 .msg-copy-btn:hover{opacity:1}
 .msg.bot strong{color:var(--ac2);font-weight:700}
@@ -507,10 +485,9 @@ select option{background:#13102b;color:#e2e8f0}
 .msg.bot h3{font-size:1.02em}.msg.bot h4{font-size:.96em}.msg.bot h5{font-size:.9em}
 .msg.bot ul{margin:4px 0 4px 14px;padding:0}
 .msg.bot li{margin:2px 0}
-/* [FINALFIXES] Copy-Button entfernt – wird per JS eingefügt */
 .msg.user{background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);color:var(--txt);align-self:flex-end;border-bottom-right-radius:4px}
 .msg.think{background:transparent;color:var(--dim);font-style:italic;font-size:.79rem;padding:4px 2px;align-self:flex-start}
-/* [V30] Unit 4: fade-swap for rotating KI status messages */
+/* Fade beim Wechsel der Statustexte */
 .msg.think .stxt{display:inline-block;transition:opacity .28s ease}
 .msg.think .stxt.fade{opacity:0}
 .cft{display:flex;flex-direction:column;gap:7px;padding:9px 12px 11px;background:rgba(0,0,0,.22);border-top:1px solid rgba(255,255,255,.05);border-radius:0 0 var(--r) var(--r);flex-shrink:0}
@@ -539,32 +516,32 @@ select option{background:#13102b;color:#e2e8f0}
 @keyframes pulse{0%,100%{box-shadow:0 0 22px var(--ac-bg)}50%{box-shadow:0 0 54px var(--ac-glow)}}
 .pumping{animation:pulse 2.2s ease-in-out infinite}
 @media(max-width:860px){.wrap{grid-template-columns:1fr;overflow-y:auto;height:auto;min-height:100vh}.sb{display:none}}
-/* [V20] MODE TOGGLE */
+/* MODE TOGGLE */
 .mtog{display:flex;background:#0c0b1c;border-radius:22px;padding:3px;gap:2px;box-shadow:var(--ni);align-self:center}
 .mtb{padding:4px 13px;border:none;border-radius:18px;font-size:.71rem;font-family:inherit;cursor:pointer;color:var(--dim);background:transparent;transition:.18s;font-weight:500;white-space:nowrap}
 .mtb.on{background:linear-gradient(135deg,var(--ac),var(--ac2));color:#fff;box-shadow:0 2px 8px var(--ac-glow)}
 .mhint{font-size:.67rem;color:var(--dim);transition:.18s}
-/* [V20] PLAN BUTTON */
+/* PLAN BUTTON */
 @keyframes spin{to{transform:rotate(360deg)}}
 .plan-spin svg{animation:spin .9s linear infinite}
 .ib.plan{border-color:var(--ac-border)}
 .ib.plan:hover{background:var(--ac-bg-strong);border-color:var(--ac);color:var(--ac2)}
 .ib.plan:disabled{opacity:.45;cursor:not-allowed;pointer-events:none}
-/* [V25] THINKING DOTS */
+/* THINKING DOTS */
 @keyframes dotB{0%,80%,100%{transform:translateY(0);opacity:.4}40%{transform:translateY(-5px);opacity:1}}
 .dots span{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin:0 2px;vertical-align:middle;animation:dotB 1.1s ease-in-out infinite}
 .dots span:nth-child(2){animation-delay:.18s}.dots span:nth-child(3){animation-delay:.36s}
-/* [V25] SCORE BADGE COLORS */
+/* SCORE BADGE COLORS */
 .tsc.urg{color:#f97316;background:rgba(249,115,22,.13);border:1px solid rgba(249,115,22,.25)}
 .tsc.mid{color:#eab308;background:rgba(234,179,8,.11);border:1px solid rgba(234,179,8,.22)}
 .tsc.lo{color:#22c55e;background:rgba(34,197,94,.1);border:1px solid rgba(34,197,94,.18)}
-/* [V25] TOAST */
+/* TOAST */
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(80px);background:rgba(20,16,45,.92);backdrop-filter:blur(14px);border:1px solid var(--ac-border);color:var(--txt);padding:9px 20px;border-radius:22px;font-size:.81rem;z-index:10000;transition:transform .25s,opacity .25s;opacity:0;pointer-events:none}
 #toast.show{transform:translateX(-50%) translateY(0);opacity:1}
-/* [V25] HABIT BOUNCE */
+/* HABIT BOUNCE */
 @keyframes hBnc{0%,100%{transform:scale(1)}50%{transform:scale(1.09)}}
 .hi.bounce{animation:hBnc .22s ease}
-/* [V27] ACCENT DROPDOWN – vertikal unter Logo, passt in 46px-Sidebar */
+/* ACCENT DROPDOWN unter dem Logo */
 .logo-wrap{position:relative;z-index:60}
 .ac-menu{position:absolute;top:46px;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;gap:8px;padding:9px 7px;background:var(--glass);backdrop-filter:blur(26px);-webkit-backdrop-filter:blur(26px);border:1px solid var(--bd);border-radius:12px;box-shadow:var(--ns);z-index:1000;animation:fi .16s ease}
 .ac-menu.hidden{display:none}
@@ -674,9 +651,9 @@ const CIRC    = 326.73;
 const POMO_T  = 25 * 60;
 let ws, wsOK = false, thinkEl = null, chatBusy = false;
 let tasks = [], dragSrc = null;
-let chatMode = 'quick'; // [V20] quick | deep
+let chatMode = 'quick'; // quick | deep
 
-// [V30] Unit 4: 70 rotating funny German status messages (client-side only).
+// Statustexte im Browser, solange auf die KI gewartet wird
 const kiStatus = [
   "Ich grüble darüber 🤔",
   "Tolle Frage! 🚀",
@@ -750,8 +727,7 @@ const kiStatus = [
   "Gleich bin ich fertig ⏳"
 ];
 
-// [V30] Unit 4: rotating status animator for the think bubble.
-// Initial fixed sequence, then random cycle every 2500 ms. No repeats.
+// Erst zwei feste Texte, danach alle 2,5 s ein zufälliger aus kiStatus
 function startKiStatus(msgElement){
   if(!msgElement) return null;
   const h = { el: msgElement, t1: 0, t2: 0, iv: 0, last: -1 };
@@ -794,8 +770,6 @@ function genPlan() {
   if (chatBusy) return;
   const btn = document.getElementById('planBtn');
   btn.classList.add('plan-spin'); btn.disabled = true;
-  // [V28] Phase 1 wie im Chat – Status wird vom ESP aus live via 'aistatus' aktualisiert.
-  // [V30] Unit 4: rotierende lustige Status-Messages starten.
   thinkEl = addThink('Verbinde mit Assistent... 🔗');
   kiHandle = startKiStatus(thinkEl);
   chatBusy = true;
@@ -827,10 +801,9 @@ function handle(m) {
     case 'pomo':   updP(m);               break;
     case 'chat':   onAI(m.text);          break;
     case 'aistatus': updateThink(m.text); break;
-    // [CRITICAL-FIX] Add streaming handlers – without these aiDelta never updates UI
     case 'aiDelta': {
-      // Incremental SSE chunk – append to current bot message
-      if (!thinkEl) return;  // No active AI response
+      // Teilantwort beim Streaming an die aktuelle Bubble anhängen
+      if (!thinkEl) return;
       const stxt = thinkEl.querySelector('.stxt');
       if (stxt && m.c) {
         // Replace dots with actual content as it streams in
@@ -847,12 +820,12 @@ function handle(m) {
       break;
     }
     case 'aiDone': {
-      // Streaming complete – replace think element with final message
+      // Streaming fertig, Bubble wird zur fertigen Nachricht
       if (!thinkEl) return;
       const txt = thinkEl.querySelector('.stxt');
       const content = txt ? txt.textContent : '';
-      // [FINALFIXES-BUG1] DO NOT set thinkEl=null here – let onAI() handle conversion
-      if (content) onAI(content);  // Finalize with renderMd (onAI will clear thinkEl)
+      // thinkEl hier nicht auf null setzen, das macht onAI()
+      if (content) onAI(content);
       break;
     }
     case 'lock':   m.v ? unlock() : lock(); break;
@@ -942,20 +915,18 @@ function subT() {
   showToast('✅ Aufgabe hinzugefügt');
 }
 
-// [V28] Mini-Markdown: **bold**, *italic*, `code`, ## Heading, - list.
-// HTML zuerst escapen, dann gezielte Tags einsetzen – kein fremder HTML-Input möglich.
+// Mini-Markdown: **bold**, *italic*, `code`, ## Heading, - list.
+// Zuerst HTML escapen, erst danach die eigenen Tags einsetzen.
 function renderMd(s){
   if(!s) return '';
   s = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
-  // [CRITICAL-FIX] Tabellen mit Separator-Zeilen korrekt rendern
-  // Problem: |---|---| (separator) wurde als Datenzeile behandelt
-  // Lösung: Filter Separators und style Header mit Akzentfarbe
+  // Tabellen
   s = s.replace(/(\|[^|\n]+\|.*\n)+/g, m => {
     let rows = m.trim().split('\n').filter(r => r.trim());
     if (rows.length < 2) return m;
 
-    // [CRITICAL-FIX] Remove separator row (|---|---|)
+    // Trennzeile |---|---| entfernen
     rows = rows.filter(row => !/^\|\s*[-:]+\s*(\|\s*[-:]+\s*)*\|?\s*$/.test(row));
 
     if (rows.length < 1) return m;  // Empty after filter
@@ -965,7 +936,7 @@ function renderMd(s){
       const cells = row.split('|').map(c => c.trim()).filter(c => c);
       html += '<tr>';
       cells.forEach(cell => {
-        // [CRITICAL-FIX] First row is header (th) with accent color background
+        // erste Zeile ist der Header
         const tag = i === 0 ? 'th' : 'td';
         const style = i === 0
           ? 'border:1px solid var(--ac-border);padding:4px;text-align:left;background:var(--ac);color:#fff;font-weight:bold'
@@ -978,19 +949,17 @@ function renderMd(s){
     return html;
   });
 
-  // [V29-BLOCK1] A2: Code-Blöcke (```...```)
+  // Code-Blöcke
   s = s.replace(/```([a-z]*)\n([\s\S]*?)```/g, '<pre style="background:rgba(0,0,0,.28);padding:8px;border-radius:4px;overflow-x:auto;margin:4px 0"><code>$2</code></pre>');
 
-  // [CRITICAL-FIX] Headings mit Akzentfarbe und Bold-Unterstützung
-  // [FINAL-FIX] Extended to support #### and ##### headings
+  // Überschriften # bis #####
   s = s.replace(/^# ([^\n]+)$/gm,'<h3 style="color:var(--ac);font-weight:bold">$1</h3>')
        .replace(/^## ([^\n]+)$/gm,'<h4 style="color:var(--ac);font-weight:bold">$1</h4>')
        .replace(/^### ([^\n]+)$/gm,'<h5 style="color:var(--ac);font-weight:bold">$1</h5>')
        .replace(/^#### ([^\n]+)$/gm,'<h6 style="color:var(--ac);font-weight:bold">$1</h6>')
        .replace(/^##### ([^\n]+)$/gm,'<p style="color:var(--ac);font-weight:bold;font-size:0.9em;margin:4px 0">$1</p>');
 
-  // Inline
-  // [MARKDOWN-FIX] Only bold if 2+ characters - prevents **W**ir becoming <b>W</b>ir
+  // Inline. Fett erst ab 2 Zeichen, sonst wird aus **W**ir ein <b>W</b>ir
   s = s.replace(/\*\*([^*\n]{2,})\*\*/g,'<strong>$1</strong>')
        .replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<em>$2</em>')
        .replace(/`([^`\n]+)`/g,'<code style="background:rgba(0,0,0,.28);padding:1px 5px;border-radius:4px">$1</code>');
@@ -1002,7 +971,7 @@ function renderMd(s){
   return s;
 }
 function copyFallback(text, btn) {
-  // Fallback for browsers without Clipboard API (HTTP contexts, older browsers)
+  // Ohne HTTPS gibt es keine Clipboard API, darum execCommand
   const textarea = document.createElement('textarea');
   textarea.value = text;
   textarea.style.position = 'fixed';
@@ -1028,14 +997,12 @@ function addM(txt, cls) {
   if (cls === 'think' || cls === 'bot') d.innerHTML = cls === 'bot' ? renderMd(txt) : txt;
   else d.textContent = txt;
 
-  // [SOCKET-RESET] Copy-Button mit Fallback für HTTP-Browser
+  // Copy-Button
   if (cls === 'bot') {
-    // Store original HTML content BEFORE adding button
     const originalHTML = d.innerHTML;
 
     const btn = document.createElement('button');
     btn.className = 'msg-copy-btn';
-    // SVG copy icon (cleaner design)
     btn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
     btn.title = 'In Zwischenablage kopieren';
 
@@ -1056,18 +1023,18 @@ function addM(txt, cls) {
 function addThink(label) {
   const dots = '<span class="dots"><span></span><span></span><span></span></span>';
   const lab  = label || '';
-  // [V28] .stxt umschliesst den Textteil, damit er per updateThink() lebend getauscht werden kann
+  // .stxt, damit updateThink() den Text austauschen kann
   return addM('<span class="stxt">' + lab + '</span>\u2009' + dots, 'think');
 }
 function updateThink(label) {
   if (!thinkEl) return;
-  // [V30] Unit 4: Live 'aistatus' vom Server übersteuert die lustige Rotation.
+  // Status vom ESP hat Vorrang vor der Rotation im Browser
   stopKiStatus(kiHandle);
   kiHandle = null;
   const s = thinkEl.querySelector('.stxt');
   if (s) {
     s.textContent = label;
-    // [FINALFIXES-BUG1] Hide thinking-bubble when label becomes empty
+    // leeres Label: Bubble ausblenden
     if (label === '') {
       thinkEl.style.display = 'none';
     }
@@ -1079,18 +1046,14 @@ function sndC() {
   if (!txt) return;
   inp.value = '';
   addM(txt, 'user');
-  // [V28] Phase 1: sofortiger lokaler Echo – ESP braucht ~300-500ms für TLS,
-  // ohne diesen Echo fühlt sich das Tippen träge an.
-  // [V30] Unit 4: rotierende lustige Status-Messages starten.
+  // Sofort lokal anzeigen, der ESP braucht 300-500 ms für TLS
   thinkEl = addThink('Verbinde mit Assistent... 🔗');
   kiHandle = startKiStatus(thinkEl);
   chatBusy = true;
   wsSend({t:'chat', text:txt, mode:chatMode});
 }
 function onAI(text) {
-  // [V27] Fallback: falls thinkEl nicht (mehr) existiert, frische Bot-Bubble erzeugen,
-  // sonst ginge die AI-Antwort verloren (Quick-Mode "toter Text"-Bug).
-  // [V30] Unit 4: rotierende Status-Messages stoppen bevor die echte Antwort kommt.
+  // Gibt es kein thinkEl mehr, neue Bubble anlegen, sonst geht die Antwort verloren
   stopKiStatus(kiHandle);
   kiHandle = null;
   if (thinkEl) { thinkEl.className = 'msg bot fi'; thinkEl.innerHTML = renderMd(text); thinkEl = null; }
@@ -1166,8 +1129,6 @@ self.addEventListener('fetch', e => {
 });
 )SWJS";
 
-// [BLE-REMOVED] BLE Callbacks class removed (MyServerCallbacks)
-
 // ============================================================
 //  WEBSOCKET BROADCAST HELPERS
 // ============================================================
@@ -1215,10 +1176,10 @@ void bcLock(int v) {
   webSocket.broadcastTXT(j.c_str(), j.length());
 }
 
-// [V28] Status-Broadcast für 3-Phasen-Anzeige während KI-Anfragen:
-// Phase 1 (lokal, Browser): "Verbinde mit Assistent"
-// Phase 2 (ESP, sofort bei Job-Annahme): "Schicke deine Frage..."
-// Phase 3 (ESP, alle 2.5s): rotierende Funny-Status-Texte.
+// Statusanzeige während einer KI-Anfrage:
+// 1. Browser zeigt sofort "Verbinde mit Assistent"
+// 2. ESP schickt bei Annahme des Jobs "Schicke deine Frage..."
+// 3. danach alle 2,5 s ein Text aus FUNNY_STATUS
 void bcStatus(const String& text) {
   DynamicJsonDocument doc(256);
   doc["t"] = "aistatus";
@@ -1228,8 +1189,7 @@ void bcStatus(const String& text) {
 }
 
 void bcChat(const String& text) {
-  // [REFACTOR-V31] Cache in char buffer for late-connecting clients
-  // Allocate buffer on first use (4096 B)
+  // Für Clients merken, die sich erst später verbinden
   if (!lastAiReplyBuf) {
     lastAiReplyBuf = (char*)malloc(AI_RESULT_BUF_MAX);
   }
@@ -1239,7 +1199,6 @@ void bcChat(const String& text) {
   }
   lastAiReplyTime = millis();
   lastAiReplyConsumed = false;
-
 
   DynamicJsonDocument doc(4096);
   doc["t"] = "chat";
@@ -1253,20 +1212,20 @@ void sendStateTo(uint8_t num) {
   doc["t"] = "state";
   doc["checkedIn"] = checkedIn;
   doc["ram"] = ESP.getFreeHeap();
-  
+
   JsonObject pomo = doc.createNestedObject("pomo");
   pomo["active"] = pomodoroActive;
   pomo["time"]   = pomodoroActive ? max(0L, (long)((pomodoroEndTime - millis()) / 1000)) : 0;
   pomo["phases"] = pomodoroPhases;
   pomo["isBreak"]= pomodoroBreak;
-  
+
   JsonArray tasks = doc.createNestedArray("tasks");
   for (int i = 0; i < taskCount; i++) {
     JsonObject tObj = tasks.createNestedObject();
     tObj["name"]  = taskList[i].name;
     tObj["score"] = taskList[i].score;
   }
-  
+
   JsonArray habs = doc.createNestedArray("habits");
   for (int i = 0; i < MAX_HABITS; i++) {
     JsonObject hObj = habs.createNestedObject();
@@ -1274,12 +1233,11 @@ void sendStateTo(uint8_t num) {
     hObj["done"]   = habits[i].doneToday;
     hObj["streak"] = habits[i].streak;
   }
-  
+
   String j; j.reserve(2500); serializeJson(doc, j);
   webSocket.sendTXT(num, j.c_str(), j.length());
 
-  // [REFACTOR-V31] Replay cached response if client was offline at broadcast
-  // [FIX-NULL] lastAiReplyBuf kann nullptr sein – erst auf != nullptr prüfen!
+  // Gemerkte Antwort nachliefern (lastAiReplyBuf kann nullptr sein)
   if (!lastAiReplyConsumed && lastAiReplyBuf && lastAiReplyBuf[0] &&
       (millis() - lastAiReplyTime) < 60000) {
     DynamicJsonDocument cdoc(4096);
@@ -1293,12 +1251,12 @@ void sendStateTo(uint8_t num) {
 }
 
 // ============================================================
-//  WEBSOCKET EVENT HANDLER (Zero-Copy Parsing)
+//  WEBSOCKET EVENT HANDLER
 // ============================================================
 void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
   DynamicJsonDocument doc(1024);
   DeserializationError err = deserializeJson(doc, payload, length);
-  if (err) return; // Silent Fail bei ungültigen Daten
+  if (err) return;  // ungültiges JSON ignorieren
 
   const char* tp = doc["t"];
   if (!tp) return;
@@ -1308,30 +1266,29 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
     int v = doc["v"] | 0;
     int prevState = checkedIn;
     checkedIn = v;
-    
-    // [ENGINEER-FIX5] Heap-aware mode switching on check-in/check-out transitions
+
     if (v == 1 && prevState == 0) {
-      // CHECK-IN: User wakes up the device - WebUI mode active
+      // Check-in: Web-UI aktiv
       wakeUpDisplay();
       Serial.printf("[CHECKIN] Mode: WebUI active (Heap: %u B, MaxAlloc: %u B)\n",
                     ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-      // Force-free lastAiReplyBuf to maximize heap for upcoming AI requests
+      // Replay-Puffer freigeben, mehr Heap für die nächste KI-Anfrage
       if (lastAiReplyBuf) {
         free(lastAiReplyBuf);
         lastAiReplyBuf = nullptr;
         Serial.println("[CHECKIN] Freed lastAiReplyBuf for fresh session");
       }
     } else if (v == 0 && prevState == 1) {
-      // CHECK-OUT: User leaves - Telegram mode active
+      // Check-out: nur noch Telegram
       Serial.printf("[CHECKOUT] Mode: Telegram active (Heap: %u B, MaxAlloc: %u B)\n",
                     ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-      // Force-free lastAiReplyBuf - WebUI replay no longer needed
+      // ohne Web-UI braucht es keinen Replay
       if (lastAiReplyBuf) {
         free(lastAiReplyBuf);
         lastAiReplyBuf = nullptr;
         Serial.println("[CHECKOUT] Freed lastAiReplyBuf - heap returned to Telegram pool");
       }
-      // Reset TLS health state to ensure clean Telegram polling
+      // TLS-Verbindung beim nächsten Request neu prüfen
       tlsHealthy = false;
     }
     bcLock(v);
@@ -1358,7 +1315,7 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
     String action = doc["action"] | "";
     if (action == "add") {
       processTask(doc["cat"] | "todo", doc["weight"] | 1.0f, doc["days"] | 1, doc["fname"] | "Task");
-      // triggerEventBlink();  // [LITE] LED deaktiviert – einkommentieren für LED-Support
+      // triggerEventBlink();  // nur mit LEDs
     }
     else if (action == "del") {
       int idx = doc["idx"] | -1;
@@ -1387,8 +1344,8 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
     if (idx >= 0 && idx < MAX_HABITS) {
       habits[idx].doneToday = !habits[idx].doneToday;
       bcHabits();
-      saveHabits();  // [DEMO-FEATURE] Persist habit changes to SPIFFS
-      // triggerEventBlink();  // [LITE] LED deaktiviert – einkommentieren für LED-Support
+      saveHabits();
+      // triggerEventBlink();  // nur mit LEDs
     }
   }
   else if (type == "chat") {
@@ -1396,23 +1353,22 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
     String text = doc["text"] | "";
     if (text.length() == 0) return;
 
-    // [DEEP-FIX] Mode-aware mit Payload-Guard
     const char* modeStr = doc["mode"] | "quick";
     bool isDeep  = (strcmp(modeStr, "deep") == 0);
     const char* model = isDeep ? "llama-3.3-70b-versatile" : "llama-3.1-8b-instant";
 
     String prompt;
     if (isDeep) {
-      // [FINALFIXES] Input-Limit erhöht: 600 → 2000 Zeichen (keine Abschnitte mehr)
+      // max. 2000 Zeichen
       String userText = text;
       if (userText.length() > 2000) {
         Serial.printf("[CHAT] Text zu lang (%d > 2000), kürze für deep.\n", userText.length());
         userText = userText.substring(0, 1997) + "...";
       }
-      // Deep prompt komprimiert (HTTP 413 Fix)
+      // Prompt kurz halten, sonst kommt HTTP 413
       prompt = "Recherche strukturiert (## Ueberschriften). Max 450 Woerter, schliesse mit ## Fazit. Deutsch. Thema: " + userText;
     } else {
-      // [FINALFIXES] Quick Input-Limit: 400 → 1000 Zeichen
+      // max. 1000 Zeichen
       String userText = text;
       if (userText.length() > 1000) userText = userText.substring(0, 997) + "...";
       prompt = "Kurz (max 120 W), freundlich, Deutsch. **Fett** fuer Keys. Frage: " + userText;
@@ -1421,30 +1377,27 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
     Serial.printf("[CHAT] %s-Mode, Prompt-Größe: %d Zeichen\n", isDeep ? "Deep" : "Quick", prompt.length());
 
     if (!requestAI(AI_JOB_WEB, prompt, model)) {
-      // [FIX-UX] requestAI() sendet bei Heap-Fehler bereits eine eigene bcChat()-Meldung.
-      // "ausgelastet" nur anzeigen wenn wirklich ein anderer Job läuft (pending==true).
+      // Bei Heap-Problemen meldet sich requestAI() schon selbst
       if (aiJob.pending) {
         bcChat("⚠️ Die KI ist gerade beschäftigt. Bitte warte kurz.");
       }
     }
   }
   else if (type == "plan") {
-    // [DEEP-FIX] Plan-Generator: optimiert für HTTP 413 Prevention
+    // Tagesplan, Prompt klein halten wegen HTTP 413
     if (checkedIn == 0) return;
-    if (taskCount == 0) { bcChat("ℹ️ Keine offenen Aufgaben – nichts zu planen! 🎉"); return; }
+    if (taskCount == 0) { bcChat("ℹ️ Keine offenen Aufgaben, nichts zu planen! 🎉"); return; }
 
-    // Fix 1: Task-Limiter – max 15 wichtigste Tasks
+    // nur die 15 wichtigsten Aufgaben
     int taskShow = min((int)taskCount, 15);
 
     String pp;
     pp.reserve(2000);
-    // [V29] Plan-Prompt komprimiert (HTTP 413 Fix)
     pp = "Plan (HH:MM **Aufgabe**, keine Erklaerung, max 250 W, Deutsch):\n\nAufgaben:\n";
 
-    // Fix 2: JSON-Stripping – nur name + score, keine Metadaten
+    // nur Name und Score
     for (int i = 0; i < taskShow; i++) {
       pp += String(i+1) + ". " + taskList[i].name + " (Prio:" + String((int)taskList[i].score) + ")\n";
-      // Fix 3: Früh brechen wenn payload zu groß wird (> 6000 Zeichen)
       if (pp.length() > 6000) {
         pp += "...(+weitere Aufgaben)\n";
         break;
@@ -1457,7 +1410,7 @@ void handleWSMsg(uint8_t num, uint8_t* payload, size_t length) {
       if (pp.length() > 6000) break;
     }
 
-    // Fix 3: String-Buffer Guard – kürze aggressiv wenn zu groß
+    // immer noch zu groß: nur die Top 5
     if (pp.length() > 6000) {
       Serial.printf("[PLAN] Payload zu groß (%d > 6000), kürze Tasks aggressiv.\n", pp.length());
       pp = "Plan (Top 5, HH:MM **Aufgabe**, max 200 W, Deutsch):\n";
@@ -1483,13 +1436,13 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length)
   switch (type) {
     case WStype_DISCONNECTED: break;
     case WStype_CONNECTED:    sendStateTo(num); break;
-    case WStype_TEXT:         handleWSMsg(num, payload, length); break; // [FIX] Zero-Copy
+    case WStype_TEXT:         handleWSMsg(num, payload, length); break;
     default: break;
   }
 }
 
 // ============================================================
-//  TELEGRAM HELPERS (Sicheres JSON Routing)
+//  TELEGRAM HELPERS
 // ============================================================
 int sendTgMsg(const String& chat_id, const String& text) {
   WiFiClientSecure lc; lc.setInsecure();
@@ -1499,7 +1452,7 @@ int sendTgMsg(const String& chat_id, const String& text) {
   http.addHeader("Connection",   "close");
   http.setTimeout(8000);
 
-  // [FIX] Sicheres JSON bauen – 4096 nötig: AI-Antworten können >2000 Zeichen sein
+  // 4096, KI-Antworten können über 2000 Zeichen lang sein
   DynamicJsonDocument req(4096);
   req["chat_id"] = chat_id;
   req["text"]    = text;
@@ -1568,16 +1521,16 @@ void sendTgMenu(const String& chat_id, const String& text) {
   DynamicJsonDocument req(2048);
   req["chat_id"] = chat_id;
   req["text"]    = text;
-  
+
   JsonObject reply_markup = req.createNestedObject("reply_markup");
   JsonArray keyboard = reply_markup.createNestedArray("keyboard");
   JsonArray row1 = keyboard.createNestedArray(); row1.add("-Aufgaben-"); row1.add("⏱ Pomodoro");
   JsonArray row2 = keyboard.createNestedArray(); row2.add("KI-Frage"); row2.add("📊 Status");
   JsonArray row3 = keyboard.createNestedArray(); row3.add("Erledigt"); row3.add("➕ Neu");
-  
+
   reply_markup["resize_keyboard"] = true;
   reply_markup["persistent"]      = true;
-  
+
   String payload; serializeJson(req, payload);
   http.POST(payload);
   http.end(); lc.stop();
@@ -1587,13 +1540,12 @@ void sendTgMenu(const String& chat_id, const String& text) {
 //  AI-TASK (Core 1)
 // ============================================================
 
-// [LOW-HEAP-UX] Free optional buffers and yield to let the allocator consolidate.
-// Returns bytes freed. Called by aiTask when a job was accepted under low heap.
+// Optionale Puffer freigeben und kurz warten. Gibt die freigewordenen Bytes zurück.
 uint32_t aggressiveHeapCleanup() {
   uint32_t freed = 0;
-  Serial.println("[TIER1-CLEANUP] Starting aggressive heap cleanup...");
+  Serial.println("[TIER1] Heap cleanup...");
 
-  // Step 1: Free the late-join replay cache (4 KB) – safe to discard when heap is low
+  // Replay-Puffer (4 KB) kann weg
   if (lastAiReplyBuf) {
     free(lastAiReplyBuf);
     lastAiReplyBuf = nullptr;
@@ -1601,23 +1553,20 @@ uint32_t aggressiveHeapCleanup() {
     Serial.printf("[TIER1] Freed lastAiReplyBuf (%.1f KB)\n", AI_RESULT_BUF_MAX / 1024.0);
   }
 
-  // Step 2: Clear any pending strings (accumulated String objects in stack)
-  // Force a garbage collection pass by yielding repeatedly
-  Serial.println("[TIER1] Forcing garbage collection with yield loops...");
+  // Den anderen Tasks Zeit geben, ihren Speicher freizugeben
+  Serial.println("[TIER1] Yield loop...");
   for (int i = 0; i < 5; i++) {
     vTaskDelay(pdMS_TO_TICKS(100));
     uint32_t heapNow = ESP.getFreeHeap();
     Serial.printf("[TIER1] Yield %d: Heap now %u B\n", i + 1, heapNow);
   }
 
-  // Step 3: Snapshot heap state before and after explicit yield
   uint32_t heapBefore = ESP.getFreeHeap();
   uint32_t maxAllocBefore = ESP.getMaxAllocHeap();
   Serial.printf("[TIER1] Before extended yield: Free=%u B, MaxAlloc=%u B\n",
                 heapBefore, maxAllocBefore);
 
-  // Step 4: Extended yield for allocator to coalesce adjacent free blocks
-  // This is critical for preventing fragmentation (maxAlloc collapse)
+  // Nochmal 500 ms, damit freie Blöcke zusammenkommen
   for (int i = 0; i < 10; i++) {
     vTaskDelay(pdMS_TO_TICKS(50));  // Total 500ms of yielding
   }
@@ -1631,11 +1580,11 @@ uint32_t aggressiveHeapCleanup() {
                 heapAfter, heapRecovered, maxAllocAfter,
                 (int)maxAllocAfter - (int)maxAllocBefore);
 
-  Serial.printf("[TIER1-CLEANUP] Done: Total freed %u B (%.1f KB)\n", freed, freed / 1024.0);
+  Serial.printf("[TIER1] Cleanup done, freed %u B (%.1f KB)\n", freed, freed / 1024.0);
   return freed;
 }
 
-// [BULLETPROOF-TIER2] Enter critical TLS mode – pause other services to maximize heap
+// Telegram und WebSocket pausieren, damit TLS genug Heap bekommt
 void enterCriticalTlsMode(int currentType) {
   if (tlsCriticalMode) return;  // Already active
   tlsCriticalMode = true;
@@ -1643,15 +1592,15 @@ void enterCriticalTlsMode(int currentType) {
   webSocketTaskEnabled = false;
   networkTaskEnabled = false;
   vTaskDelay(pdMS_TO_TICKS(200));  // Allow tasks to pause gracefully
-  Serial.println("[TIER2-CRITICAL] Critical TLS mode ACTIVATED – services paused");
-  Serial.printf("[TIER2-CRITICAL] Heap: %u B, MaxAlloc: %u B\n",
+  Serial.println("[TIER2] Critical TLS mode on, services paused");
+  Serial.printf("[TIER2] Heap: %u B, MaxAlloc: %u B\n",
                 ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   if (currentType == AI_JOB_WEB) {
     bcStatus("⏳ Kritischer Modus: RAM wird maximiert...");
   }
 }
 
-// [BULLETPROOF-TIER2] Exit critical TLS mode – resume other services
+// Pausierte Dienste wieder starten
 void exitCriticalTlsMode() {
   if (!tlsCriticalMode) return;  // Not active
   tlsCriticalMode = false;
@@ -1659,20 +1608,17 @@ void exitCriticalTlsMode() {
   webSocketTaskEnabled = true;
   networkTaskEnabled = true;
   vTaskDelay(pdMS_TO_TICKS(100));  // Brief pause for task scheduler
-  Serial.println("[TIER2-CRITICAL] Critical TLS mode DEACTIVATED – services resumed");
-  Serial.printf("[TIER2-CRITICAL] Final heap: %u B, MaxAlloc: %u B\n",
+  Serial.println("[TIER2] Critical TLS mode off, services resumed");
+  Serial.printf("[TIER2] Heap: %u B, MaxAlloc: %u B\n",
                 ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
-// [BIGUPDATE] Pre-request memory and heap preparation
+// Vor jedem Request: Heap aufräumen und Timeout passend zum WLAN-Signal setzen
 void prepareForAiRequest() {
-  // Clear any stale payload to prevent fragmentation
   String tempPayload;
   tempPayload.clear();
 
-  // [ENGINEER-FIX2] Memory leak fix: Always free lastAiReplyBuf before AI request
-  // Old code only freed when heap < 35KB - this caused buildup over long uptime.
-  // New: Force free on EVERY request. Buffer is only 4KB - cheap to re-allocate.
+  // Replay-Puffer immer freigeben, die 4 KB sind schnell wieder allokiert
   if (lastAiReplyBuf) {
     Serial.printf("[AI-PREP] Force-freeing lastAiReplyBuf (Heap before: %u B)\n",
                   ESP.getFreeHeap());
@@ -1681,10 +1627,10 @@ void prepareForAiRequest() {
     vTaskDelay(pdMS_TO_TICKS(20));  // Brief yield for heap consolidation
   }
 
-  // [SOFT-WIFI] Adjust timeouts/tokens based on WiFi signal strength
+  // Timeout je nach Signalstärke
   int rssi = WiFi.RSSI();
   uint32_t tlsTimeout = 30000;
-  
+
   if (rssi >= -65) {
     // Excellent - Normal timeout
     bcStatus("📶 Ausgezeichnet");
@@ -1697,20 +1643,20 @@ void prepareForAiRequest() {
     bcStatus("📶 Sehr schwaches WiFi...");
     tlsTimeout = 60000;
   } else {
-    // Very weak - Last chance (no hard reject!)
+    // Very weak
     bcStatus("📶 Extrem schwaches WiFi...");
     tlsTimeout = 90000;
   }
-  
+
   persistentAiClient.setTimeout(tlsTimeout);
-  Serial.printf("[AI-PREP] RSSI: %d dBm → Timeout: %u ms\n", rssi, tlsTimeout);
+  Serial.printf("[AI-PREP] RSSI: %d dBm, timeout: %u ms\n", rssi, tlsTimeout);
   Serial.printf("[AI-PREP] Heap check: %u B free, MaxAlloc: %u B\n",
                 ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 }
 
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // KI MANAGER (requestAI) - Nimmt Anfragen entgegen
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 bool requestAI(int type, const String& prompt, const String& model, int telMsgId) {
   if (xSemaphoreTake(aiJobMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
 
@@ -1719,24 +1665,21 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
     return false;
   }
 
-  // Phase 1: Heap-Cleanup – free old reply buffer (replay window expired)
+  // Replay-Fenster (60 s) ist abgelaufen
   if (lastAiReplyBuf && (millis() - lastAiReplyTime > 60000)) {
     free(lastAiReplyBuf);
     lastAiReplyBuf = nullptr;
     Serial.println("[AI] Freed expired lastAiReplyBuf (4 KB recovered).");
   }
 
-  // Phase 2: Heap-Limits
-  // [NO-HARD-REJECT] Statt Hard-Reject: Quick-Cleanup VOR der Prüfung + Accept als heapWasLow.
-  // HEAP_HARD_MIN = 8000 (physisch absolutes Minimum – bei <8 KB kann selbst WebSocket nicht senden).
-  // 8–28 KB: Quick-Cleanup → Accept mit heapWasLow → aiTask führt aggressiveHeapCleanup() aus.
-  // 28–55 KB: Accept mit heapWasLow-Flag (aiTask prüft und wartet bei Bedarf).
-  const uint32_t HEAP_HARD_MIN = 8000;   // Nur absolutes physisches Minimum
+  // Heap-Grenzen:
+  //   unter 8 KB  ablehnen, dann geht nicht mal mehr ein WebSocket-Frame raus
+  //   8 bis 55 KB annehmen, aiTask räumt vorher auf (heapWasLow)
+  const uint32_t HEAP_HARD_MIN = 8000;
   uint32_t heapNow = ESP.getFreeHeap();
   bool jobHeapWasLow = false;
 
-  // [QUICK-CLEANUP-BEFORE-CHECK] lastAiReplyBuf (4 KB) sofort freigeben wenn Heap knapp.
-  // Verhindert unnötige Rejects: 17 KB + 4 KB = 21 KB → Cleanup-Pfad statt Reject.
+  // Bei knappem Heap den Replay-Puffer (4 KB) gleich hier freigeben
   if (heapNow < 55000 && lastAiReplyBuf) {
     free(lastAiReplyBuf);
     lastAiReplyBuf = nullptr;
@@ -1746,38 +1689,35 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
   }
 
   if (heapNow < HEAP_HARD_MIN) {
-    // Absolutes Minimum (<8 KB) – physisch unmöglich, selbst ein WS-Frame scheitert
-    Serial.printf("[AI] Heap absolut kritisch (%u B < %u B) – absoluter Hard-Reject.\n",
+    Serial.printf("[AI] Heap zu klein (%u B < %u B), Anfrage abgelehnt.\n",
                   heapNow, HEAP_HARD_MIN);
     xSemaphoreGive(aiJobMutex);
-    // Statisches JSON – kein DynamicJsonDocument (würde bei <8 KB ebenfalls malloc-failen)
+    // Statisches JSON, ein DynamicJsonDocument bekommt hier auch kein malloc mehr
     if (type == AI_JOB_WEB) {
       static const char critErrJson[] =
         "{\"t\":\"chat\",\"text\":\"\u26a0\ufe0f RAM < 8 KB. Bitte ESP neu starten.\"}";
       webSocket.broadcastTXT(critErrJson, strlen(critErrJson));
     } else if (type == AI_JOB_TELEGRAM && telMsgId > 0) {
-      // Kein TLS-Aufruf riskieren – Nachricht bleibt auf "Ueberlege..."
+      // Kein TLS riskieren, die Nachricht bleibt auf "Überlege..."
       Serial.println("[AI] Telegram-Nachricht bleibt stehen (RAM zu niedrig fuer editTgMsg).");
     }
     return false;
 
   } else if (heapNow < 28000) {
-    // Niedrig aber wiederherstellbar: Accept + Cleanup-Flag (aiTask wartet bis 28 KB)
-    Serial.printf("[AI] Heap niedrig (%u B) – Accept mit heapWasLow (aiTask macht Cleanup).\n", heapNow);
+    // aiTask wartet, bis wieder 28 KB frei sind
+    Serial.printf("[AI] Heap niedrig (%u B), Cleanup im aiTask.\n", heapNow);
     jobHeapWasLow = true;
   } else if (heapNow < 55000) {
-    // Moderat niedrig: Accept mit Monitoring-Flag
-    Serial.printf("[AI] Heap moderat (%u B) – accepting with cleanup flag.\n", heapNow);
+    Serial.printf("[AI] Heap moderat (%u B), Cleanup im aiTask.\n", heapNow);
     jobHeapWasLow = true;
   }
 
-  // [OPTION3] Check for degraded mode (heap fragmentation)
+  // Heap fragmentiert: kleineres Modell oder weniger Tokens
   uint32_t maxAllocNow = ESP.getMaxAllocHeap();
   bool degradedModeNeeded = false;
 
   if (heapNow >= HEAP_HARD_MIN && (heapNow < 30000 || maxAllocNow < 38000)) {
-    // Heap too fragmented for normal TLS – offer degraded mode
-    Serial.printf("[AI-DEGRADE] Low maxAlloc (%u B) – applying degraded mode\n", maxAllocNow);
+    Serial.printf("[AI-DEGRADE] Low maxAlloc (%u B), using degraded mode\n", maxAllocNow);
     degradedModeNeeded = true;
 
     // Fallback 1: Try smaller model if using 70b
@@ -1789,13 +1729,12 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
     }
   }
 
-  // [FIX2] aiJob.result is now static – no malloc needed
-  aiJob.result[0] = '\0';  // Clear buffer
+  aiJob.result[0] = '\0';
 
   strncpy(aiJob.prompt, prompt.c_str(), AI_PROMPT_MAX - 1);
   aiJob.prompt[AI_PROMPT_MAX - 1] = '\0';
 
-  // [OPTION3] Apply degraded mode if needed
+  // Apply degraded mode if needed
   String actualModel = model;
   if (degradedModeNeeded && strstr(model.c_str(), "70b")) {
     actualModel = "llama-3.1-8b-instant";
@@ -1809,9 +1748,9 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
   aiJob.telMsgId   = telMsgId;
   aiJob.pending    = true;
   aiJob.done       = false;
-  aiJob.heapWasLow = jobHeapWasLow;  // [LOW-HEAP-UX]
-  aiJob.degradedMode = degradedModeNeeded;  // [OPTION3]
-  // If model was NOT changed but we're in degraded mode, reduce tokens
+  aiJob.heapWasLow = jobHeapWasLow;
+  aiJob.degradedMode = degradedModeNeeded;
+  // Modell nicht gewechselt, dann stattdessen weniger Tokens
   aiJob.tokenReductionApplied = (degradedModeNeeded && actualModel == model);
   aiJob.result[0]  = '\0';
 
@@ -1820,7 +1759,7 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
   wakeUpDisplay();
   if (AITask) xTaskNotifyGive(AITask);
 
-  // ACK an Browser: RAM-Optimierungsstatus ODER normaler Status
+  // Rückmeldung an den Browser
   if (type == AI_JOB_WEB) {
     if (jobHeapWasLow) {
       bcStatus("⏳ RAM wird optimiert, die Anfrage kann laenger dauern");
@@ -1832,32 +1771,32 @@ bool requestAI(int type, const String& prompt, const String& model, int telMsgId
   lastStatusIdx = -1;
   return true;
 }
-// ───────────────────────────────────────────────────────────
-// [DEMO-FEATURE] Habit Persistierung via SPIFFS
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// HABITS IM SPIFFS
+// ------------------------------------------------------------
 
 // Speichert alle Habits in SPIFFS
 void saveHabits() {
   File f = SPIFFS.open("/habits.json", "w");
   if (!f) {
-    Serial.println("[HABIT-SAVE] ❌ SPIFFS open failed");
+    Serial.println("[HABIT-SAVE] SPIFFS open failed");
     return;
   }
-  
+
   DynamicJsonDocument doc(1024);
   JsonArray arr = doc.createNestedArray("habits");
-  
+
   for (int i = 0; i < MAX_HABITS; i++) {
     JsonObject h = arr.createNestedObject();
     h["streak"] = habits[i].streak;
     h["lastDone"] = habits[i].doneToday ? millis() : 0;
     h["isFake"] = habits[i].isFake;
   }
-  
+
   serializeJson(doc, f);
   f.close();
-  
-  Serial.printf("[HABIT-SAVE] ✅ Saved %d habits to SPIFFS\n", MAX_HABITS);
+
+  Serial.printf("[HABIT-SAVE] Saved %d habits to SPIFFS\n", MAX_HABITS);
 }
 
 // Lädt alle Habits aus SPIFFS
@@ -1867,35 +1806,35 @@ void loadHabits() {
     Serial.println("[HABIT-LOAD] No habits.json found (first boot or corrupted)");
     return;
   }
-  
+
   DynamicJsonDocument doc(1024);
   DeserializationError err = deserializeJson(doc, f);
   if (err) {
-    Serial.printf("[HABIT-LOAD] ❌ JSON parse error: %s\n", err.c_str());
+    Serial.printf("[HABIT-LOAD] JSON parse error: %s\n", err.c_str());
     f.close();
     return;
   }
-  
+
   JsonArray arr = doc["habits"];
   if (!arr) {
-    Serial.println("[HABIT-LOAD] ❌ No habits array in JSON");
+    Serial.println("[HABIT-LOAD] No habits array in JSON");
     f.close();
     return;
   }
-  
+
   for (int i = 0; i < arr.size() && i < MAX_HABITS; i++) {
     habits[i].streak = arr[i]["streak"] | 0;
     habits[i].doneToday = (arr[i]["lastDone"] | 0) > 0;
     habits[i].isFake = arr[i]["isFake"] | false;
   }
-  
+
   f.close();
-  Serial.printf("[HABIT-LOAD] ✅ Loaded %d habits from SPIFFS\n", MAX_HABITS);
+  Serial.printf("[HABIT-LOAD] Loaded %d habits from SPIFFS\n", MAX_HABITS);
 }
 
-// ───────────────────────────────────────────────────────────
-// [SOCKET-RESET] Persistent TLS Management
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
+// PERSISTENTE TLS-VERBINDUNG
+// ------------------------------------------------------------
 void setupPersistentTls() {
   persistentAiClient.setInsecure();
   persistentAiClient.setHandshakeTimeout(30);
@@ -1903,26 +1842,25 @@ void setupPersistentTls() {
 
   if (persistentAiClient.connect("api.groq.com", 443, 30000)) {
     tlsHealthy = true;
-    Serial.println("[SOCKET-RESET] Persistent TLS initialized");
+    Serial.println("[TLS] Persistent TLS initialized");
   } else {
-    Serial.println("[SOCKET-RESET] Persistent TLS init failed");
+    Serial.println("[TLS] Persistent TLS init failed");
   }
 }
 
-// [ENGINEER-FIX4] Track consecutive TLS failures - force full re-init after 2 fails
+// Nach 2 Fehlern in Folge wird der Client komplett neu aufgebaut
 static uint8_t tlsConsecutiveFailures = 0;
 
 bool ensurePersistentTlsHealth() {
-  // Quick check: if recently healthy and still connected → no reconnect needed
+  // Verbindung steht noch
   if (tlsHealthy && persistentAiClient.connected()) {
     tlsConsecutiveFailures = 0;  // Reset on success
     return true;
   }
 
-  // [ENGINEER-FIX4] After 2 consecutive failures, force FULL re-init (not just reconnect)
-  // This handles undefined-state cases where mbedTLS context is corrupted
+  // mbedTLS bleibt manchmal in einem kaputten Zustand hängen, dann hilft nur ein neuer Client
   if (tlsConsecutiveFailures >= 2) {
-    Serial.println("[ENGINEER-FIX4] 2x consecutive TLS failures - forcing full re-init");
+    Serial.println("[TLS] 2 failures in a row, rebuilding client");
     persistentAiClient.stop();
     vTaskDelay(pdMS_TO_TICKS(500));  // Longer wait for full mbedTLS cleanup
     persistentAiClient = WiFiClientSecure();  // Reconstruct client object
@@ -1930,10 +1868,10 @@ bool ensurePersistentTlsHealth() {
     persistentAiClient.setHandshakeTimeout(30);
     persistentAiClient.setTimeout(30000);
     tlsConsecutiveFailures = 0;
-    Serial.printf("[ENGINEER-FIX4] Re-init complete, Heap: %u B, MaxAlloc: %u B\n",
+    Serial.printf("[TLS] Client rebuilt, Heap: %u B, MaxAlloc: %u B\n",
                   ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   } else {
-    // Socket is dead → stop and attempt single reconnect
+    // Socket ist tot, einmal neu verbinden
     persistentAiClient.stop();
     vTaskDelay(pdMS_TO_TICKS(200));
   }
@@ -1941,23 +1879,19 @@ bool ensurePersistentTlsHealth() {
   if (persistentAiClient.connect("api.groq.com", 443, 30000)) {
     tlsHealthy = true;
     tlsConsecutiveFailures = 0;
-    Serial.println("[SOCKET-RESET] TLS health restored");
+    Serial.println("[TLS] TLS health restored");
     return true;
   }
 
   tlsHealthy = false;
-  tlsConsecutiveFailures++;  // Increment failure counter
-  Serial.printf("[SOCKET-RESET] TLS health check failed (consecutive: %d)\n", tlsConsecutiveFailures);
+  tlsConsecutiveFailures++;
+  Serial.printf("[TLS] TLS health check failed (consecutive: %d)\n", tlsConsecutiveFailures);
   return false;
 }
 
-// ───────────────────────────────────────────────────────────
-// [HOPEFULLYFINAL] warmUpTls() removed – was causing extended TLS handshake blocks
-// that triggered TG1WDT hardware watchdog resets on subsequent calls
-
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 // KI WORKER (aiTask) - Führt die API-Anfragen aus
-// ───────────────────────────────────────────────────────────
+// ------------------------------------------------------------
 void aiTask(void* pv) {
   vTaskDelay(pdMS_TO_TICKS(100));  // Small delay to ensure task is fully initialized
 
@@ -1968,9 +1902,9 @@ void aiTask(void* pv) {
     char currentModel[AI_MODEL_MAX];
     int currentType;
     int currentTelId;
-    bool currentHeapWasLow;               // [LOW-HEAP-UX]
-    bool currentDegradedMode;             // [OPTION3]
-    bool currentTokenReductionApplied;    // [OPTION3]
+    bool currentHeapWasLow;
+    bool currentDegradedMode;
+    bool currentTokenReductionApplied;
 
     xSemaphoreTake(aiJobMutex, portMAX_DELAY);
     strncpy(currentPrompt, aiJob.prompt, AI_PROMPT_MAX - 1);
@@ -1979,16 +1913,16 @@ void aiTask(void* pv) {
     currentModel[AI_MODEL_MAX - 1] = '\0';
     currentType       = aiJob.type;
     currentTelId      = aiJob.telMsgId;
-    currentHeapWasLow = aiJob.heapWasLow;  // [LOW-HEAP-UX]
-    currentDegradedMode = aiJob.degradedMode;  // [OPTION3]
-    currentTokenReductionApplied = aiJob.tokenReductionApplied;  // [OPTION3]
+    currentHeapWasLow = aiJob.heapWasLow;
+    currentDegradedMode = aiJob.degradedMode;
+    currentTokenReductionApplied = aiJob.tokenReductionApplied;
     xSemaphoreGive(aiJobMutex);
 
     Serial.printf("[AI] Start: %s | MaxHeap: %d B | RSSI: %d dBm\n",
                   currentModel, ESP.getMaxAllocHeap(), WiFi.RSSI());
 
     if (WiFi.status() != WL_CONNECTED) {
-      Serial.println("[AI] Kein WLAN – Request abgebrochen.");
+      Serial.println("[AI] Kein WLAN, Request abgebrochen.");
       xSemaphoreTake(aiJobMutex, portMAX_DELAY);
       snprintf(aiJob.result, AI_RESULT_MAX, "⚠️ Kein WLAN. Bitte warte kurz.");
       aiJob.done    = true;
@@ -1997,17 +1931,14 @@ void aiTask(void* pv) {
       continue;
     }
 
-    // ═══ HEAP GATE ═══ Wait for heap recovery
-    // [LOW-HEAP-UX] HEAP_SOFT_MIN lowered from 50000 → 28000 (TLS needs ~25-30 KB).
-    // Two paths: low-heap path runs aggressiveHeapCleanup() + 30s wait with status updates;
-    // normal path runs 5s wait (unchanged logic, just lower SOFT_MIN constant).
+    // Warten, bis genug Heap frei ist (TLS braucht ca. 25 bis 30 KB)
     {
       const uint32_t HEAP_SOFT_MIN = 28000;
       bool heapAbort = false;
 
       if (currentHeapWasLow) {
-        // [LOW-HEAP-UX] Accepted under low heap – run aggressive cleanup first
-        Serial.printf("[AI] heapWasLow=true, heap=%u B – running aggressiveHeapCleanup.\n",
+        // Job wurde bei wenig Heap angenommen, also zuerst aufräumen
+        Serial.printf("[AI] heapWasLow=true, heap=%u B, running aggressiveHeapCleanup.\n",
                       ESP.getFreeHeap());
 
         if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
@@ -2023,17 +1954,15 @@ void aiTask(void* pv) {
 
         aggressiveHeapCleanup();
 
-        // [ENGINEER-FIX3] Extended wait: 30s → 10s to prevent TG1WDT risk
-        // BLE-removal makes heap recovery faster, no need for 30s timeout
-        // vTaskDelay(500) every iteration keeps task watchdog happy
-        const uint32_t WAIT_MAX_MS = 10000;  // Reduced from 30000 to prevent watchdog
+        // max. 10 s, sonst schlägt der Watchdog zu
+        const uint32_t WAIT_MAX_MS = 10000;
         uint32_t waitStart = millis();
         uint32_t lastStatusUpdate = 0;
 
         while (ESP.getFreeHeap() < HEAP_SOFT_MIN) {
           uint32_t elapsed = millis() - waitStart;
           if (elapsed > WAIT_MAX_MS) {
-            Serial.printf("[AI] Heap cleanup timeout after 10s (%u B < %u B) – aborting.\n",
+            Serial.printf("[AI] Heap cleanup timeout after 10s (%u B < %u B), aborting.\n",
                           ESP.getFreeHeap(), HEAP_SOFT_MIN);
             xSemaphoreTake(aiJobMutex, portMAX_DELAY);
             snprintf(aiJob.result, AI_RESULT_MAX,
@@ -2074,7 +2003,7 @@ void aiTask(void* pv) {
         }
 
       } else {
-        // Normal path: 5s wait (HEAP_SOFT_MIN now 28000 instead of 50000)
+        // Normaler Fall: max. 5 s warten
         const uint32_t WAIT_MAX_MS = 5000;
         uint32_t waitStart = millis();
         bool heapWasLowLocal = (ESP.getFreeHeap() < HEAP_SOFT_MIN);
@@ -2082,7 +2011,7 @@ void aiTask(void* pv) {
         while (ESP.getFreeHeap() < HEAP_SOFT_MIN) {
           if (millis() - waitStart > WAIT_MAX_MS) {
             uint32_t heapAtTimeout = ESP.getFreeHeap();
-            Serial.printf("[AI] Heap recovery timeout (%u B < %u B) – aborting.\n",
+            Serial.printf("[AI] Heap recovery timeout (%u B < %u B), aborting.\n",
                           heapAtTimeout, HEAP_SOFT_MIN);
             xSemaphoreTake(aiJobMutex, portMAX_DELAY);
             snprintf(aiJob.result, AI_RESULT_MAX,
@@ -2128,7 +2057,7 @@ void aiTask(void* pv) {
       if (heapAbort) continue;
     }
 
-    // [HEAP-PROFILE] Profiling snapshot: PRE-TLS state
+    // Heap vor TLS loggen
     {
       uint32_t heapFree = ESP.getFreeHeap();
       uint32_t maxAlloc = ESP.getMaxAllocHeap();
@@ -2137,11 +2066,10 @@ void aiTask(void* pv) {
                     heapFree, maxAlloc, fragments, (100.0 * fragments / heapFree));
     }
 
-    // ═══ TIER 2 CRITICAL MODE CHECK ═══ Detect need for service blocking
-    // If MaxAllocHeap too fragmented, enter critical mode to maximize contiguous heap
+    // Zu wenig zusammenhängender Heap: kritischen Modus aktivieren
     {
       uint32_t maxAllocBeforeTls = ESP.getMaxAllocHeap();
-      const uint32_t TIER2_THRESHOLD = 38000;  // 38 KB – minimum for safe TLS
+      const uint32_t TIER2_THRESHOLD = 38000;  // 38 KB Minimum für TLS
 
       Serial.printf("[TLS-PRE] MaxAllocHeap: %u B (threshold: %u B)\n",
                     maxAllocBeforeTls, TIER2_THRESHOLD);
@@ -2149,31 +2077,29 @@ void aiTask(void* pv) {
       if (maxAllocBeforeTls < TIER2_THRESHOLD) {
         Serial.println("[TIER2] MaxAllocHeap fragmented! Entering critical mode...");
 
-        // [TIER2] Pause all background services
+        // Pause all background services
         enterCriticalTlsMode(currentType);
 
-        // [TIER1] Run enhanced cleanup in critical mode
+        // Run enhanced cleanup in critical mode
         uint32_t freedInCritical = aggressiveHeapCleanup();
 
-        // [TIER2] Monitor MaxAllocHeap recovery
+        // Monitor MaxAllocHeap recovery
         uint32_t maxAllocAfterCleanup = ESP.getMaxAllocHeap();
         Serial.printf("[TIER2] After cleanup: MaxAlloc=%u B (freed ~%u B)\n",
                       maxAllocAfterCleanup, freedInCritical);
 
         if (maxAllocAfterCleanup < TIER2_THRESHOLD) {
-          // [TIER3] Still critical – provide diagnostics before TLS attempt
-          Serial.println("[TIER3-DIAGNOSTIC] SEVERE FRAGMENTATION – Detailed analysis:");
+          // Still critical, provide diagnostics before TLS attempt
+          Serial.println("[TIER3] Heap stark fragmentiert:");
           Serial.printf("  Free heap: %u B\n", ESP.getFreeHeap());
           Serial.printf("  Max contiguous: %u B (need: ~50000 B for TLS+POST)\n", maxAllocAfterCleanup);
           Serial.printf("  WiFi RSSI: %d dBm\n", WiFi.RSSI());
           Serial.printf("  WiFi status: %d\n", WiFi.status());
 
-          // [TIER3-WAIT] Konsolidierungswartezeit statt direktem TLS-Versuch.
-          // Verhindert "esp-sha: Failed to allocate buf memory" wenn maxAlloc < 38 KB:
-          // mbedTLS SHA braucht ~8 KB zusammenhängenden Block – Warten gibt dem Allocator
-          // Zeit freie Fragmente zusammenzuführen (bis zu 10 s, Check alle 500 ms).
+          // Bis zu 10 s warten statt sofort TLS zu versuchen. Sonst kommt
+          // "esp-sha: Failed to allocate buf memory" (SHA braucht ca. 8 KB am Stück).
           if (currentType == AI_JOB_WEB) {
-            bcStatus("⏳ RAM stark fragmentiert – warte auf Konsolidierung...");
+            bcStatus("⏳ RAM stark fragmentiert, warte kurz...");
           }
           for (int _w = 0; _w < 20 && ESP.getMaxAllocHeap() < TIER2_THRESHOLD; _w++) {
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -2192,13 +2118,11 @@ void aiTask(void* pv) {
       }
     }
 
-    // [SOCKET-RESET] Use persistent TLS instead of fresh sslClient per request
-    // This avoids per-request fragmentation that was causing HTTP -1 after 5 requests
+    // Persistente Verbindung statt neuem Client pro Request. Neue Clients haben
+    // den Heap fragmentiert, nach ca. 5 Requests kam nur noch HTTP -1.
     if (!ensurePersistentTlsHealth()) {
-      Serial.println("[AI-TLS] Persistent TLS health check failed – aborting");
-      // [FIX-TIER2-LEAK] exitCriticalTlsMode() MUSS hier aufgerufen werden!
-      // Ohne diesen Call bleibt tlsCriticalMode=true, webSocketTaskEnabled=false
-      // und telegramTaskEnabled=false → Gray UI + keine Telegram-Antworten (dauerhaft).
+      Serial.println("[AI-TLS] Persistent TLS health check failed, aborting");
+      // Wichtig, sonst bleiben WebSocket und Telegram dauerhaft pausiert
       if (tlsCriticalMode) exitCriticalTlsMode();
       xSemaphoreTake(aiJobMutex, portMAX_DELAY);
       snprintf(aiJob.result, AI_RESULT_MAX, "⚠️ TLS Verbindung fehlgeschlagen.");
@@ -2214,8 +2138,8 @@ void aiTask(void* pv) {
     // Check WiFi signal strength before attempting to use TLS
     int rssi = WiFi.RSSI();
     if (rssi < -75) {
-      Serial.printf("[AI] WiFi signal too weak (RSSI %d dBm) – aborting.\n", rssi);
-      if (tlsCriticalMode) exitCriticalTlsMode();  // [TIER2] Exit critical mode on abort
+      Serial.printf("[AI] WiFi signal too weak (RSSI %d dBm), aborting.\n", rssi);
+      if (tlsCriticalMode) exitCriticalTlsMode();  // Exit critical mode on abort
       xSemaphoreTake(aiJobMutex, portMAX_DELAY);
       snprintf(aiJob.result, AI_RESULT_MAX,
                "⚠️ WiFi-Signal zu schwach (RSSI %d dBm). Bitte näher zum Router gehen.",
@@ -2223,26 +2147,22 @@ void aiTask(void* pv) {
       aiJob.done = true;
       aiJob.pending = false;
       xSemaphoreGive(aiJobMutex);
-      continue;  // Back to while(1) start
+      continue;
     }
 
-    // [SOCKET-RESET] TLS already established via persistent socket
-    // No need for TLS retry loop – HTTP POST handles retries below
+    // TLS steht, Retries macht der POST weiter unten
     Serial.printf("[AI-HTTP] TLS ready, proceeding to HTTP POST (heap: %u B)\n",
                   ESP.getFreeHeap());
 
-    // [PHASE3-PERSISTENT-TLS] TLS is now ready – proceed with HTTP
     if (tlsCriticalMode) {
       Serial.println("[TIER2] Using persistent TLS in critical mode");
     }
 
-    // [BIGUPDATE-POST] HTTP POST with -1 retry logic
+    // HTTP POST, bei Code -1 ein zweiter Versuch
     uint32_t t_start = millis();
 
-    // Call preparation function
     prepareForAiRequest();
 
-    // [HEAP-PROFILE] Profiling snapshot: PRE-HTTP state
     {
       uint32_t heapFree = ESP.getFreeHeap();
       uint32_t maxAlloc = ESP.getMaxAllocHeap();
@@ -2255,7 +2175,7 @@ void aiTask(void* pv) {
     bool httpSuccess = false;
 
     for (int httpAttempt = 1; httpAttempt <= MAX_HTTP_ATTEMPTS && !httpSuccess; httpAttempt++) {
-      // [BIGUPDATE] Validate heap before each POST attempt
+      // Validate heap before each POST attempt
       uint32_t heapBeforePost = ESP.getFreeHeap();
       if (heapBeforePost < 32000) {
         Serial.printf("[AI-POST] Heap low before POST attempt %d: %u B\n",
@@ -2268,19 +2188,17 @@ void aiTask(void* pv) {
         }
       }
 
-      // [BIGUPDATE] Build request fresh each attempt
+      // Build request fresh each attempt
       String bodyLocal;
       {
         DynamicJsonDocument reqDoc(2048);
         reqDoc["model"]       = currentModel;
         reqDoc["stream"]      = false;
-        
-        // [FINAL-FIX] Dynamic token calculation - prevents truncated AI responses
-        // Groq limit: ~7500 tokens combined (input + output)
+
+        // max_tokens nach Promptlänge, Groq erlaubt ca. 7500 Tokens (Input + Output)
         int promptTokens = (strlen(currentPrompt) / 4) + 50;
         int maxTokens = (strstr(currentModel, "70b") ? 400 : 500);
-        
-        // Adjust based on prompt length to maximize output space
+
         if (promptTokens < 100) {
           maxTokens = min(1200, 7500 - promptTokens);
         } else if (promptTokens < 200) {
@@ -2290,15 +2208,15 @@ void aiTask(void* pv) {
         } else {
           maxTokens = min(600, 7500 - promptTokens);
         }
-        
-        // [OPTION3] Apply token reduction if heap was low
+
+        // Apply token reduction if heap was low
         if (currentTokenReductionApplied) {
           maxTokens = min(300, maxTokens);
           Serial.printf("[AI] Max tokens reduced to %d (degraded mode)\n", maxTokens);
         }
-        
+
         Serial.printf("[AI-TOKEN] Prompt: %d tok, max output: %d tok\n", promptTokens, maxTokens);
-        
+
         reqDoc["max_tokens"]  = maxTokens;
         reqDoc["temperature"] = 0.7;
 
@@ -2323,7 +2241,7 @@ void aiTask(void* pv) {
 
       String key = (currentType == AI_JOB_WEB) ? GROQ_API_KEY_WEB : GROQ_API_KEY_TG;
 
-      // [SOCKET-RESET] Use persistent socket for HTTP POST
+      // Use persistent socket for HTTP POST
       HTTPClient httpAttempt_client;
       if (!httpAttempt_client.begin(persistentAiClient, "https://api.groq.com/openai/v1/chat/completions")) {
         Serial.println("[AI-POST] http.begin() failed");
@@ -2339,12 +2257,11 @@ void aiTask(void* pv) {
       httpAttempt_client.addHeader("Authorization", "Bearer " + key);
       httpAttempt_client.addHeader("Connection", "close");
       httpAttempt_client.addHeader("Content-Length", String(bodyLocal.length()));
-      httpAttempt_client.setTimeout(35000);  // [BIGUPDATE] 35s for full POST + response
+      httpAttempt_client.setTimeout(35000);  // 35s for full POST + response
 
       Serial.printf("[AI-POST] Attempt %d/%d: Body=%d B, Heap=%u B\n",
                     httpAttempt, MAX_HTTP_ATTEMPTS, bodyLocal.length(), ESP.getFreeHeap());
 
-      // [BIGUPDATE] Explicit timeout tracking
       uint32_t postStart = millis();
       httpCode = httpAttempt_client.POST((uint8_t*)bodyLocal.c_str(), bodyLocal.length());
       uint32_t postDuration = millis() - postStart;
@@ -2352,7 +2269,6 @@ void aiTask(void* pv) {
       Serial.printf("[AI-POST] Attempt %d returned code %d (duration: %u ms)\n",
                     httpAttempt, httpCode, postDuration);
 
-      // [HEAP-PROFILE] Profiling snapshot: POST-HTTP state
       {
         uint32_t heapFree = ESP.getFreeHeap();
         uint32_t maxAlloc = ESP.getMaxAllocHeap();
@@ -2386,7 +2302,6 @@ void aiTask(void* pv) {
             aiJob.pending = false;
             xSemaphoreGive(aiJobMutex);
 
-            // [FINALFIXES-BUG3-DIAG] Log response delivery info
             if (currentType == AI_JOB_WEB) {
               Serial.printf("[AI-STORE] Web response stored (%d bytes), broadcasting aiDone\n", (int)strlen(content));
 
@@ -2412,18 +2327,18 @@ void aiTask(void* pv) {
           }
         }
 
-        // [SOCKET-RESET] Increment request counter and check for periodic reset
+        // Nach RESET_SOCKET_AFTER Requests die Verbindung neu aufbauen
         requestCountSinceReset++;
         if (requestCountSinceReset >= RESET_SOCKET_AFTER) {
-          Serial.printf("[SOCKET-RESET] Counter reached %d – resetting socket\n", RESET_SOCKET_AFTER);
+          Serial.printf("[TLS] Counter reached %d, resetting socket\n", RESET_SOCKET_AFTER);
           persistentAiClient.stop();
           vTaskDelay(pdMS_TO_TICKS(500));
           if (persistentAiClient.connect("api.groq.com", 443, 30000)) {
             tlsHealthy = true;
-            Serial.println("[SOCKET-RESET] Socket freshly reconnected");
+            Serial.println("[TLS] Socket freshly reconnected");
           } else {
             tlsHealthy = false;
-            Serial.println("[SOCKET-RESET] Socket reconnect failed!");
+            Serial.println("[TLS] Socket reconnect failed!");
           }
           requestCountSinceReset = 0;
         }
@@ -2431,10 +2346,10 @@ void aiTask(void* pv) {
         httpSuccess = true;  // Exit loop
 
       } else if (httpCode == -1 && httpAttempt < MAX_HTTP_ATTEMPTS) {
-        // [PHASE3] RETRY PATH for -1 (no TLS reconnect needed – persistent connection handles it)
+        // HTTP -1: nochmal versuchen, die TLS-Verbindung bleibt offen
         httpAttempt_client.end();
 
-        Serial.printf("[AI-POST] HTTP -1 on attempt %d, will retry after 7.5s (persistent TLS stable)\n", httpAttempt);
+        Serial.printf("[AI-POST] HTTP -1 on attempt %d, retry in 7.5s\n", httpAttempt);
         xSemaphoreTake(aiJobMutex, portMAX_DELAY);
         snprintf(aiJob.result, AI_RESULT_MAX,
                  "⏳ Verbindung unstabil, versuche erneut... (Versuch %d/2)",
@@ -2453,13 +2368,9 @@ void aiTask(void* pv) {
 
         vTaskDelay(pdMS_TO_TICKS(7500));  // 7.5s before retry
 
-        // [PHASE3] Persistent TLS remains connected – no reconnect needed!
-        // Just retry the POST with the existing stable connection
-
       } else {
         // ERROR PATH (non -1 or final attempt)
         httpAttempt_client.end();
-        // [PHASE3] No sslClient.stop() – persistent TLS remains connected
 
         // Classify error
         if (httpCode == 401) {
@@ -2472,11 +2383,11 @@ void aiTask(void* pv) {
           snprintf(aiJob.result, AI_RESULT_MAX,
                    "KI Fehler: Anfrage zu lang (413).");
         } else if (httpCode == -1) {
-          // [BIGUPDATE] Final -1 after retry
+          // Final -1 after retry
           snprintf(aiJob.result, AI_RESULT_MAX,
                    "⚠️ Verbindung fehlgeschlagen nach 2 Versuchen. Heap: %u B. Bitte erneut versuchen.",
                    ESP.getFreeHeap());
-          Serial.println("[AI-POST] HTTP -1 after retry – network issue persists");
+          Serial.println("[AI-POST] HTTP -1 again after retry");
         } else if (httpCode > 0) {
           snprintf(aiJob.result, AI_RESULT_MAX,
                    "KI Fehler (HTTP %d).", httpCode);
@@ -2493,30 +2404,20 @@ void aiTask(void* pv) {
       }
     }
 
-    // [PHASE3] Persistent TLS connection remains open for next request
-    // No sslClient.stop() needed – connection is maintained across requests
-    // This eliminates 36-40KB per-request fragmentation!
-
-    Serial.printf("[AI-REQUEST-COMPLETE] Persistent TLS ready for next request (heap: %u B, maxAlloc: %u B)\n",
+    Serial.printf("[AI] Done (heap: %u B, maxAlloc: %u B)\n",
                   ESP.getFreeHeap(), ESP.getMaxAllocHeap());
 
-    // [TIER2] Exit critical TLS mode – resume background services
+    // Exit critical TLS mode, resume background services
     if (tlsCriticalMode) {
       exitCriticalTlsMode();
     }
-
-    // [CRITICAL-FIX] Do NOT free aiJob.result here!
-    // The main loop reads aiJob.result AFTER aiJob.done=true.
-    // Freeing here (outside mutex) causes NULL pointer dereference (LoadProhibited crash).
-    // The main loop now frees the buffer safely inside the mutex after reading.
-
   }
 }
 // ============================================================
 //  DISPLAY & REMINDERS
 // ============================================================
 
-// [STARTUP-UI] Display Willkommenstext centered for 3 seconds
+// Willkommensbildschirm für 3 Sekunden
 void showStartupScreen() {
   if (xSemaphoreTake(displayMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
 
@@ -2526,7 +2427,7 @@ void showStartupScreen() {
   display.setCursor(10, 20);
   display.println("Willkommen");
   display.setCursor(25, 40);
-  display.println("YOUR_NAME");  // ← Deinen Namen hier eintragen
+  display.println("YOUR_NAME");  // eigenen Namen eintragen
   display.display();
 
   xSemaphoreGive(displayMutex);
@@ -2543,7 +2444,7 @@ void wakeUpDisplay() {
   if (screensaverActive) { screensaverActive = false; updateDisplay(); }
 }
 
-// [V29-BLOCK1] Trigger blue LED blink auf Events
+// Blaue LED blinkt bei Events (nur mit LEDs)
 void triggerEventBlink() {
   ledCtrl.addBlinker(LED_BLUE, 3);  // Blink 3 times
 }
@@ -2554,7 +2455,7 @@ void updateDisplay() {
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-  // [BLE-REMOVED] BLE bitmap removed, show WiFi RSSI in corner instead
+  // WLAN-Signal oben links
   display.setTextSize(1);
   display.setCursor(0, 0);
   if (WiFi.status() == WL_CONNECTED) {
@@ -2595,7 +2496,7 @@ void updateDisplay() {
     if (!habits[i].doneToday) display.drawRect(118 + (i % 3) * 4, 56 + (i / 3) * 4, 2, 2, SSD1306_WHITE);
   }
 
-  // [V29-BLOCK1] A11: OLED-Live KI-Anzeige – Spinner + erste Zeichen der Antwort
+  // Spinner, solange die KI arbeitet
   if (aiJob.pending) {
     static uint32_t spinnerTime = 0;
     static const char* spinners[] = {"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"};
@@ -2621,12 +2522,12 @@ void checkTimeReminders() {
   struct tm ti; if (!getLocalTime(&ti)) return;
   int h = ti.tm_hour, m = ti.tm_min;
   if (lastReminderHour == h) return;
-  
+
   String msg;
   if (h == 7 && m >= 28 && m <= 32) {
     msg = "☀️ Guten Morgen!\nHeute:\n";
     if (taskCount == 0) {
-      msg += "Keine Aufgaben – freier Tag!\n";
+      msg += "Keine Aufgaben, freier Tag!\n";
     } else {
       int showCount = min((int)taskCount, 10);
       for (int i = 0; i < showCount; i++) msg += "- " + taskList[i].name + "\n";
@@ -2654,28 +2555,28 @@ void checkMidnightReset() {
     for (int i = 0; i < MAX_HABITS; i++) {
       if (habits[i].doneToday) {
         habits[i].streak++;
-        msg += "✅ " + String(habits[i].name) + " – " + String(habits[i].streak) + "d 🔥\n";
+        msg += "✅ " + String(habits[i].name) + ": " + String(habits[i].streak) + "d 🔥\n";
       } else {
-        if (habits[i].streak > 0) msg += "❌ " + String(habits[i].name) + " – Streak zurückgesetzt\n";
+        if (habits[i].streak > 0) msg += "❌ " + String(habits[i].name) + ": Streak zurückgesetzt\n";
         habits[i].streak = 0;
       }
       habits[i].doneToday = false;
     }
     bcHabits(); sendTgMsg(CHAT_ID, msg);
-    saveHabits();  // [DEMO-FEATURE] Persist streak changes to SPIFFS
+    saveHabits();
   }
 }
 
 void checkStaleTasks() {
-  if (millis() - lastStaleChk < 3600000UL) return; 
+  if (millis() - lastStaleChk < 3600000UL) return;
   lastStaleChk = millis();
   unsigned long now = millis();
-  
+
   for (int i = 0; i < taskCount; i++) {
     if (!taskList[i].staleAlerted && (now - taskList[i].createdAt > 48UL * 3600UL * 1000UL) && taskList[i].score > 15.0f) {
       String p = "Mein Name ist YOUR_NAME. Die Aufgabe '" + taskList[i].name + "' liegt seit über 2 Tagen unerledigt (Score: " + String((int)taskList[i].score) + "). Schreibe eine kurze, motivierende Nachricht auf Deutsch und schlage vor, jetzt einen 25-Min Pomodoro zu starten.";
-      
-      // [FIX] Warnung nur als "versendet" markieren, wenn die KI den Auftrag annimmt!
+
+      // nur als gemeldet markieren, wenn die KI den Job annimmt
       if (requestAI(AI_JOB_TELEGRAM, p, "llama-3.1-8b-instant")) {
          taskList[i].staleAlerted = true;
       }
@@ -2690,7 +2591,7 @@ void processTask(const String& cat, float weight, int days, const String& fachNa
 
   String shortF = fachName.substring(0, 2); shortF.toUpperCase();
   String name   = shortF + "-" + cat.substring(0, 4); name.toUpperCase();
-  
+
   if (taskCount < 75) {
     taskList[taskCount] = {name, score, millis(), false}; taskCount++;
   } else {
@@ -2703,7 +2604,7 @@ void processTask(const String& cat, float weight, int days, const String& fachNa
   taskList[j + 1] = key;
 
   updateDisplay();
-  tasksChanged = true; 
+  tasksChanged = true;
 }
 
 // ============================================================
@@ -2715,7 +2616,7 @@ void handleSW()       { server.send_P(200, "application/javascript", swJs); }
 void handleStatus()   { server.send(200, "application/json", "{\"checkedIn\":" + String(checkedIn) + ",\"ram\":" + String(ESP.getFreeHeap()) + "}"); }
 void handleSetCheckIn() { checkedIn = 1; server.send(200, "text/plain", "OK"); wakeUpDisplay(); bcLock(1); }
 
-// [V29-BLOCK0] SPIFFS Test Handler
+// SPIFFS testen über /test-spiffs
 void handleSPIFFSTest() {
   if (!SPIFFS.begin(true)) {
     server.send(500, "text/plain", "SPIFFS Mount fehlgeschlagen");
@@ -2723,7 +2624,7 @@ void handleSPIFFSTest() {
   }
 
   // Write test
-  File testFile = SPIFFS.open("/test_v29.txt", "w");
+  File testFile = SPIFFS.open("/test.txt", "w");
   if (!testFile) {
     server.send(500, "text/plain", "SPIFFS Write fehlgeschlagen");
     return;
@@ -2733,7 +2634,7 @@ void handleSPIFFSTest() {
   testFile.close();
 
   // Read test
-  testFile = SPIFFS.open("/test_v29.txt", "r");
+  testFile = SPIFFS.open("/test.txt", "r");
   if (!testFile) {
     server.send(500, "text/plain", "SPIFFS Read fehlgeschlagen");
     return;
@@ -2768,37 +2669,37 @@ void handleNewMessages(int num) {
     if (chat_id != CHAT_ID) continue;
     String text = bot.messages[i].text;
     bool   isCB = (bot.messages[i].type == "callback_query");
-    
+
     wakeUpDisplay();
-    
+
     if (text == "/start") {
       sendTgMenu(chat_id, "Willkommen beim Assistant Hub Pro!\nWähle eine Aktion aus dem Menü unten.");
     }
-    // [DEMO-FEATURE] SECRET COMMANDS FOR PRESENTATION
+    // Demo-Befehle für Präsentationen
     else if (text == "/giverandtask") {
       // Add 10 fake tasks
       String categories[] = {"todo", "hausaufgabe", "test"};
       String subjects[] = {"Mathe", "NT", "Englisch", "Andere"};
       int addedCount = 0;
-      
+
       for (int j = 0; j < 10 && taskCount < 75; j++) {
         String cat = categories[random(3)];
         String subj = subjects[random(4)];
         String name = "Demo-Task #" + String(j+1) + " (" + subj + ")";
-        
+
         taskList[taskCount] = {name, (float)(random(1,6)), millis(), false};
-        taskList[taskCount].isFakeTask = true;  // ← Mark as fake
+        taskList[taskCount].isFakeTask = true;
         taskCount++;
         addedCount++;
       }
-      
+
       sendTgMsg(chat_id, "✅ " + String(addedCount) + " Demo-Tasks hinzugefügt!");
       bcChat("📋 " + String(addedCount) + " neue Demo-Tasks!");
-      bcTasks();  // [DEMO-FEATURE] Update WebUI immediately
+      bcTasks();
       Serial.printf("[DEMO] Added %d fake tasks\n", addedCount);
     }
     else if (text == "/deleterandtask") {
-      // Delete all fake tasks (reverse iteration!)
+      // Demo-Tasks löschen, rückwärts wegen dem Verschieben
       int deletedCount = 0;
       for (int j = taskCount - 1; j >= 0; j--) {
         if (taskList[j].isFakeTask) {
@@ -2810,27 +2711,27 @@ void handleNewMessages(int num) {
           deletedCount++;
         }
       }
-      
+
       sendTgMsg(chat_id, "✅ " + String(deletedCount) + " Demo-Tasks gelöscht!");
       bcChat("🗑️ Demo-Tasks entfernt!");
-      bcTasks();  // [DEMO-FEATURE] Update WebUI immediately
+      bcTasks();
       Serial.printf("[DEMO] Deleted %d fake tasks\n", deletedCount);
     }
     else if (text == "/editallstreaks") {
       // Start interactive streak editor
       telegramEditState = EDIT_SELECT_HABIT;
       selectedHabitIndex = -1;
-      
+
       String msg = "Welchen Streak willst du editieren?\n\n";
       for (int j = 0; j < MAX_HABITS; j++) {
         msg += String(j+1) + "️⃣ <b>" + String(habits[j].name) + "</b> (" + String(habits[j].streak) + " Tage)\n";
       }
-      msg += "\n→ Antworte mit 1-6";
-      
+      msg += "\nAntworte mit 1-6";
+
       sendTgMsgHtml(chat_id, msg);
       Serial.printf("[DEMO] Started /editallstreaks interactive mode\n");
     }
-    // [DEMO-FEATURE] Handle /editallstreaks state machine
+    // /editallstreaks, Auswahl und neuer Wert
     else if (telegramEditState == EDIT_SELECT_HABIT) {
       // Parse habit selection (1-6)
       int habitIdx = atoi(text.c_str()) - 1;
@@ -2849,17 +2750,17 @@ void handleNewMessages(int num) {
       int newStreak = atoi(text.c_str());
       if (newStreak >= 0 && newStreak <= 365) {
         habits[selectedHabitIndex].streak = newStreak;
-        saveHabits();  // ← Persist to SPIFFS
-        
-        String msg = "✅ <b>" + String(habits[selectedHabitIndex].name) + "</b> → " + String(newStreak) + " Tage";
+        saveHabits();
+
+        String msg = "✅ <b>" + String(habits[selectedHabitIndex].name) + "</b>: " + String(newStreak) + " Tage";
         sendTgMsgHtml(chat_id, msg);
         bcStatus("Habit aktualisiert! " + String(habits[selectedHabitIndex].name) + ": " + String(newStreak) + " 🎯");
-        
+
         Serial.printf("[DEMO] Updated habit %d: streak=%d\n", selectedHabitIndex, newStreak);
       } else {
         sendTgMsg(chat_id, "❌ Ungültige Eingabe. Bitte 0-365 Tage eingeben.");
       }
-      
+
       telegramEditState = EDIT_IDLE;
       selectedHabitIndex = -1;
     }
@@ -2867,13 +2768,13 @@ void handleNewMessages(int num) {
       // Parse: /setpomocount 5
       String args = text.substring(16);  // Skip "/setpomocount "
       int newCount = atoi(args.c_str());
-      pomodoroPhases = newCount;  // [DEMO-FEATURE] Set pomodoro count
-      
-      sendTgMsg(chat_id, "✅ Pomodoro-Counter → " + String(newCount));
+      pomodoroPhases = newCount;
+
+      sendTgMsg(chat_id, "✅ Pomodoro-Counter: " + String(newCount));
       bcStatus("🍅 Pomodoro-Count: " + String(newCount));
       Serial.printf("[DEMO] Set pomodoro count to %d\n", newCount);
     }
-    // [DEMO-FEATURE] Debug commands
+    // Debug-Befehle
     else if (text == "/heap") {
       String msg = "📊 <b>Heap Status</b>\n\n";
       msg += "Free: " + String(ESP.getFreeHeap()) + " B\n";
@@ -2881,21 +2782,20 @@ void handleNewMessages(int num) {
       msg += "MinFree: " + String(ESP.getMinFreeHeap()) + " B\n";
       msg += "Tasks: " + String(taskCount) + "/75\n";
       msg += "WiFi RSSI: " + String(WiFi.RSSI()) + " dBm\n";
-      
+
       sendTgMsgHtml(chat_id, msg);
     }
     else if (text == "/uptime") {
       unsigned long uptimeMin = millis() / 60000;
       unsigned long uptimeHours = uptimeMin / 60;
       unsigned long uptimeDays = uptimeHours / 24;
-      
+
       String msg = "⏱️ <b>Uptime</b>\n" + String(uptimeDays) + "d " + String(uptimeHours % 24) + "h " + String(uptimeMin % 60) + "m";
       sendTgMsgHtml(chat_id, msg);
     }
     else if (text == "/restart") {
       sendTgMsg(chat_id, "🔄 Rebooting in 2 seconds...");
-      // [RESTART-FIX] Set flag instead of delay+restart in handler
-      // Prevents RTOS state corruption from blocking handler
+      // Neustart erst in loop(), nicht direkt hier im Handler
       restartRequestTime = millis();
       restartRequested = true;
     }
@@ -2969,13 +2869,13 @@ void handleNewMessages(int num) {
       String frage = text.substring(5); frage.trim();
       if (frage.length() == 0) continue;
 
-      // [FINALFIXES-BUG3-DIAG] Send initial thinking message and capture its ID
+      // Platzhalter senden, wird später durch die Antwort ersetzt
       int mid = sendTgMsg(chat_id, "🤔 Überlege…");
       Serial.printf("[TELEGRAM-ASK] Initial message ID from sendTgMsg: %d\n", mid);
 
       if (mid < 1) {
-        Serial.printf("[TELEGRAM-ASK] CRITICAL: sendTgMsg failed (mid=%d), cannot schedule request\n", mid);
-        continue;  // sendTgMsg failed, bail out
+        Serial.printf("[TELEGRAM-ASK] sendTgMsg failed (mid=%d), cannot schedule request\n", mid);
+        continue;
       }
 
       String prompt = "Mein Name ist YOUR_NAME. Antworte in max. 2 Sätzen, freundlich, auf Deutsch. Frage: " + frage;
@@ -2985,7 +2885,6 @@ void handleNewMessages(int num) {
       if (!requestAI(AI_JOB_TELEGRAM, prompt, "llama-3.1-8b-instant", mid)) {
          Serial.printf("[TELEGRAM-ASK] requestAI returned false, checking heap\n");
 
-         // [CRITICAL] Provide user feedback about the failure
          if (mid > 0) {
            String errMsg = "⚠️ KI ist ausgelastet (Heap: ";
            errMsg += String(ESP.getFreeHeap());
@@ -3003,30 +2902,27 @@ void handleNewMessages(int num) {
       String frage = text.substring(6); frage.trim();
       if (frage.length() == 0) continue;
 
-      // Fix 3 + 4: Kürze Frage aggressiv wenn > 500 Zeichen (HTTP 413 Prevention)
+      // max. 500 Zeichen, sonst HTTP 413
       if (frage.length() > 500) {
         Serial.printf("[DEEP] Frage zu lang (%d > 500), kürze.\n", frage.length());
         frage = frage.substring(0, 497) + "...";
       }
 
-      // [FINALFIXES-BUG3-DIAG] Send initial thinking message and capture its ID
+      // Platzhalter senden, wird später durch die Antwort ersetzt
       int mid = sendTgMsg(chat_id, "🌍 Tiefrecherche läuft…");
       Serial.printf("[TELEGRAM-DEEP] Initial message ID from sendTgMsg: %d\n", mid);
 
       if (mid < 1) {
-        Serial.printf("[TELEGRAM-DEEP] CRITICAL: sendTgMsg failed (mid=%d), cannot schedule request\n", mid);
-        continue;  // sendTgMsg failed, bail out
+        Serial.printf("[TELEGRAM-DEEP] sendTgMsg failed (mid=%d), cannot schedule request\n", mid);
+        continue;
       }
 
-      // [V29] Telegram Deep-Prompt komprimiert
       String prompt = "Recherche, strukturiert (## Ueberschriften), Deutsch, max 450 W, ## Fazit. Thema: " + frage;
       Serial.printf("[TELEGRAM-DEEP] Scheduling request with mid=%d, prompt-length=%d\n", mid, prompt.length());
 
-      // [V25.5] compound-beta ist der korrekte Groq-API-Modellname
       if (!requestAI(AI_JOB_TELEGRAM, prompt, "llama-3.3-70b-versatile", mid)) {
          Serial.printf("[TELEGRAM-DEEP] requestAI returned false\n");
 
-         // [CRITICAL] Provide user feedback about the failure
          if (mid > 0) {
            String errMsg = "⚠️ KI ist ausgelastet (Heap: ";
            errMsg += String(ESP.getFreeHeap());
@@ -3046,29 +2942,27 @@ void handleNewMessages(int num) {
 void networkTaskLogic(void*) {
   vTaskDelay(pdMS_TO_TICKS(50));  // Let task fully initialize
 
-  // [ENGINEER-FIX1] Boot-Message Retry-Fallback mit atomic check
-  // Race condition gelöst: setup() setzt bootNotifyPending=false NACH erfolgreichem Send.
-  // Wenn setup() failed, bleibt es true und networkTask retries.
-  // taskENTER_CRITICAL guarantee atomic read-modify-write on dual-core ESP32-S3.
+  // Boot-Nachricht nochmal senden, falls setup() es nicht geschafft hat.
+  // Critical Section, weil setup() auf dem anderen Kern läuft.
   bool shouldRetry = false;
   taskENTER_CRITICAL(&bootNotifyMutex);
   if (bootNotifyPending) {
-    bootNotifyPending = false;  // Atomic: claim the retry token
+    bootNotifyPending = false;
     shouldRetry = true;
   }
   taskEXIT_CRITICAL(&bootNotifyMutex);
-  
+
   if (shouldRetry) {
     vTaskDelay(pdMS_TO_TICKS(3000));  // Wait for heap to stabilize
-    Serial.printf("[BOOT-RETRY] Heap: %u B, MaxAlloc: %u B\n", 
+    Serial.printf("[BOOT-RETRY] Heap: %u B, MaxAlloc: %u B\n",
                   ESP.getFreeHeap(), ESP.getMaxAllocHeap());
     int msgId = sendTgMsgHtml(CHAT_ID, "🚀 <b>Online (delayed)</b>\nIP: <code>" + WiFi.localIP().toString() + "</code>");
     if (msgId > 0) {
       vTaskDelay(pdMS_TO_TICKS(200));
       sendTgMenu(CHAT_ID, "Menü:");
-      Serial.println("[BOOT-RETRY] ✅ Sent successfully");
+      Serial.println("[BOOT-RETRY] Sent");
     } else {
-      Serial.printf("[BOOT-RETRY] ⚠️ Failed (msgId=%d) – continuing without boot message\n", msgId);
+      Serial.printf("[BOOT-RETRY] Failed (msgId=%d), skipping boot message\n", msgId);
     }
   }
 
@@ -3083,15 +2977,14 @@ void networkTaskLogic(void*) {
 
     server.handleClient();
 
-    // [TIER2] WebSocket only if not in critical TLS mode
+    // WebSocket only if not in critical TLS mode
     if (webSocketTaskEnabled) {
       webSocket.loop();
     }
 
     if (millis() - lastBotClientReset > 50000) { client.stop(); lastBotClientReset = millis(); }
 
-    // [TIER2] Telegram polling only if not in critical TLS mode
-    // [FINAL-FIX] Threshold gesenkt 35KB → 10KB (mit BLE removed haben wir mehr Luft, aber wir bleiben tolerant)
+    // Telegram nur außerhalb vom kritischen Modus und ab 10 KB MaxAlloc
     if (telegramTaskEnabled && millis() - lastTelegramCheck > 400) {
       uint32_t maxHeap = ESP.getMaxAllocHeap();
       if (maxHeap >= 10000) {
@@ -3107,7 +3000,7 @@ void networkTaskLogic(void*) {
       lastTelegramCheck = millis();
     }
 
-    // [TIER2] During critical mode, yield to allow aiTask to progress
+    // During critical mode, yield to allow aiTask to progress
     if (tlsCriticalMode) {
       vTaskDelay(pdMS_TO_TICKS(10));  // Brief sleep in critical mode
     }
@@ -3115,10 +3008,9 @@ void networkTaskLogic(void*) {
     if (pomoChanged)  { bcPomo();  pomoChanged  = false; }
     if (tasksChanged) { bcTasks(); tasksChanged = false; }
 
-    // [V28] Phase 3: rotierender Funny-Status, solange ein Job pendet.
-    // Web: broadcast per WS (schnell, 2.5s). Telegram: editMessageText an der
-    // EINEN Bubble (3s Budget, damit Telegram-Flood-Limit nicht zuschlägt).
-    // Ein aiJob zur Zeit (pending-Flag), daher teilen sich beide den Timer.
+    // Statustext rotieren, solange ein Job läuft. Web alle 2,5 s per WebSocket,
+    // Telegram alle 3 s per editMessageText (Flood-Limit). Es läuft immer nur
+    // ein Job, darum reicht ein Timer.
     {
       xSemaphoreTake(aiJobMutex, portMAX_DELAY);
       bool pend  = aiJob.pending;
@@ -3127,9 +3019,9 @@ void networkTaskLogic(void*) {
       xSemaphoreGive(aiJobMutex);
 
       uint32_t budget = (jtype == AI_JOB_TELEGRAM) ? 3000 : 2500;
-      uint32_t minDelay = (jtype == AI_JOB_TELEGRAM) ? 1500 : 800;  // [FINAL-FIX] Initial delay
+      uint32_t minDelay = (jtype == AI_JOB_TELEGRAM) ? 1500 : 800;  // Initial delay
       if (pend && millis() - lastStatusBcTime >= budget &&
-          millis() - lastStatusBcTime >= minDelay) {  // [FINAL-FIX] Double guard
+          millis() - lastStatusBcTime >= minDelay) {
         int idx;
         do { idx = esp_random() % FUNNY_STATUS_N; } while (idx == lastStatusIdx && FUNNY_STATUS_N > 1);
         lastStatusIdx = idx;
@@ -3142,15 +3034,12 @@ void networkTaskLogic(void*) {
       }
     }
 
-    // [V21-FIX] *** KRITISCH: AI-Ergebnis abholen und zustellen ***
-    // aiJob.done wurde in allen Vorgänger-Versionen nie ausgelesen → Ergebnis verschwand im Nichts.
-    // Telegram blieb auf "Überlege…", WebUI auf "denkt nach…" – für immer.
+    // Fertiges KI-Ergebnis abholen und an Web-UI oder Telegram zustellen
     {
       xSemaphoreTake(aiJobMutex, portMAX_DELAY);
       bool rdy = aiJob.done;
       String aiTxt; int aiTp = 0; int aiTid = -1;
       if (rdy) {
-        // [CRITICAL-FIX] Defensive NULL check to prevent strlen(NULL) crash
         if (aiJob.result) {
           aiTxt = String(aiJob.result);
         } else {
@@ -3158,11 +3047,9 @@ void networkTaskLogic(void*) {
         }
         aiTp  = aiJob.type;
         aiTid = aiJob.telMsgId;
-        aiJob.done = false; // Gelesen → zurücksetzen
-        // [FIX2] aiJob.result is now static – no free() needed
+        aiJob.done = false;
 
-        // [FINALFIXES-BUG3-DIAG] Log when response is ready
-        Serial.printf("[AI-RESPONSE-READY] type=%d, telMsgId=%d, textLen=%d\n",
+        Serial.printf("[AI-RESPONSE] Ready: type=%d, telMsgId=%d, textLen=%d\n",
                       aiTp, aiTid, aiTxt.length());
       }
       xSemaphoreGive(aiJobMutex);
@@ -3182,11 +3069,6 @@ void networkTaskLogic(void*) {
       }
     }
 
-    // Periodisches Heap-Trimming alle ~500ms (100 × 5ms) gegen Fragmentierung
-    // malloc_trim(0) nicht auf Arduino/ESP verfügbar
-    static uint8_t netLoopCnt = 0;
-    if (++netLoopCnt >= 100) { /* malloc_trim(0); */ netLoopCnt = 0; }
-
     vTaskDelay(pdMS_TO_TICKS(5));
   }
 }
@@ -3196,23 +3078,20 @@ void networkTaskLogic(void*) {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  // [WDT-FIX] Task-WDT sofort deaktivieren – VOR allen blockierenden Operationen
-  // (showStartupScreen 3s, WiFi-Connect bis 16s, setupPersistentTls bis 30s).
-  // Ohne diesen Call kann TG1WDT im Verbindungsaufbau auslösen.
+  // Task-WDT aus, setup() blockiert teilweise lange
+  // (Startscreen 3 s, WLAN bis 16 s, TLS bis 30 s)
   esp_task_wdt_deinit();
-  // pinMode(ledPin, OUTPUT);  // [LITE] LED deaktiviert
+  // pinMode(ledPin, OUTPUT);
 
-  // [V29-BLOCK1] LED-Controller setup: Green atmet kontinuierlich, Red for Pomodoro
-  // [DISABLED] causing TG1WDT crash during init
-  // ledCtrl.addBreather(LED_GREEN, 2000);  // Idle: Green atmet (2s Periode)
-  // ledCtrl.addBreather(LED_RED, 2000);    // Pomodoro: Red synchronized (auch 2s, aber wird nur aktiv bei Pomodoro)
+  // LEDs aus, das hat beim Init den Watchdog ausgelöst
+  // ledCtrl.addBreather(LED_GREEN, 2000);
+  // ledCtrl.addBreather(LED_RED, 2000);
   Wire.begin(SDA_PIN, SCL_PIN);
   display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS);
 
   displayMutex = xSemaphoreCreateMutex();
   aiJobMutex   = xSemaphoreCreateMutex();
 
-  // [STARTUP-UI] Show welcome screen
   showStartupScreen();
 
   WiFi.begin(ssid, password);
@@ -3228,11 +3107,9 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);
   esp_wifi_set_ps(WIFI_PS_NONE);
 
-  // [CRITICAL-FIX] Configure explicit DNS servers for reliable api.groq.com resolution
-  // DHCP-provided DNS can be unreliable on marginal WiFi (-72 dBm).
-  // Use Google Public DNS (8.8.8.8, 8.8.4.4) as fallback.
-  IPAddress primaryDNS(8, 8, 8, 8);      // Google DNS Primary
-  IPAddress secondaryDNS(8, 8, 4, 4);    // Google DNS Secondary
+  // Google DNS, der DNS vom Router hat api.groq.com bei schwachem WLAN oft nicht aufgelöst
+  IPAddress primaryDNS(8, 8, 8, 8);
+  IPAddress secondaryDNS(8, 8, 4, 4);
   if (!WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), primaryDNS, secondaryDNS)) {
     Serial.println("[WIFI] Failed to configure DNS servers");
   } else {
@@ -3245,31 +3122,28 @@ void setup() {
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
   bot.longPoll = 0;
 
-  // [DEMO-FEATURE] Load Habits from SPIFFS (Streak persistence after power loss)
+  // Streaks aus dem SPIFFS laden
   loadHabits();
 
-  // [FINAL-FIX] BOOT-MESSAGE HIER (vor setupPersistentTls, vor Tasks)
-  // Heap ist noch ~70-80 KB frisch, optimale Bedingungen für TLS-Handshake
+  // Boot-Nachricht vor setupPersistentTls() senden, jetzt ist noch am meisten Heap frei
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("[BOOT] Sending boot notification (Heap: %u B, MaxAlloc: %u B)...\n", 
+    Serial.printf("[BOOT] Sending boot notification (Heap: %u B, MaxAlloc: %u B)...\n",
                   ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-    int msgId = sendTgMsgHtml(CHAT_ID, "🚀 <b>Assistant Hub Pro online!</b>\nIP: <code>" + WiFi.localIP().toString() + "</code>\n<i>BLE-free Edition</i>");
+    int msgId = sendTgMsgHtml(CHAT_ID, "🚀 <b>Assistant Hub Pro online!</b>\nIP: <code>" + WiFi.localIP().toString() + "</code>");
     if (msgId > 0) {
-      Serial.printf("[BOOT] ✅ Sent successfully! msgId=%d\n", msgId);
+      Serial.printf("[BOOT] Sent, msgId=%d\n", msgId);
       delay(200);
       sendTgMenu(CHAT_ID, "Menü:");
     } else {
-      Serial.printf("[BOOT] ⚠️ Failed (msgId=%d), Heap: %u B – will retry from networkTask\n", 
+      Serial.printf("[BOOT] Failed (msgId=%d), Heap: %u B\n",
                     msgId, ESP.getFreeHeap());
     }
   } else {
     Serial.println("[BOOT] WiFi not connected, skipping boot notification");
   }
 
-  // [SOCKET-RESET] Initialize persistent TLS for AI requests
+  // Initialize persistent TLS for AI requests
   setupPersistentTls();
-
-  // [BLE-REMOVED] BLE init block removed - frees ~30-40 KB heap
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/manifest.json", HTTP_GET, handleManifest);
@@ -3282,13 +3156,10 @@ void setup() {
   webSocket.begin();
   webSocket.onEvent(webSocketEvent);
 
-  // [FIX-WEBUI] Tasks ZUERST erstellen → server.handleClient() läuft ab sofort auf Core 0.
+  // Net-Task auf Core 0 (Server, WebSocket, Telegram), AI-Task auf Core 1
   xTaskCreatePinnedToCore(networkTaskLogic, "Net", 20480, NULL, 2, &NetworkTask, 0);
   xTaskCreatePinnedToCore(aiTask, "AI", 65536, NULL, 1, &AITask, 1);
-  bootNotifyPending = false;  // [FINAL-FIX] Boot-Message bereits oben gesendet
-
-  // [REFACTOR-V31] TLS-Warmup entfernt – bringt kein Performance-Gain und riskiert TG1WDT
-  // Streaming mit SSE auf jeden Call ist effizienter
+  bootNotifyPending = false;  // wurde oben schon gesendet
 
   lastInteractionTime = millis();
 }
@@ -3299,10 +3170,9 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // [V29-BLOCK1] LED-Controller update (breathing + blinking)
-  // ledCtrl.update();  // [LITE] LED deaktiviert – einkommentieren für LED-Support
+  // ledCtrl.update();  // nur mit LEDs
 
-  // [FINAL-FIX] Heap telemetry every 30s - for monitoring memory health
+  // Heap alle 30 s loggen
   static unsigned long lastHeapLog = 0;
   if (now - lastHeapLog > 30000) {
     lastHeapLog = now;
@@ -3362,8 +3232,6 @@ void loop() {
       lastPomoWsBc = now;
   }
 
-  // [BLE-REMOVED] BLE connection state lines removed from loop
-
   if (isNewDataFlash && flashRemain == 0) { flashRemain = 10; flashTimer = now; isNewDataFlash = false; }
   if (flashRemain > 0 && now - flashTimer >= 40) {
     digitalWrite(ledPin, (flashRemain % 2 == 0) ? LOW : HIGH);
@@ -3380,13 +3248,12 @@ void loop() {
     lastUpdate = now;
   }
 
-  // [RESTART-FIX] Safe restart from main loop after 2s delay
-  // Prevents RTOS state corruption by executing from loop() instead of handler
+  // Neustart für /restart, 2 s nach dem Befehl
   if (restartRequested && (now - restartRequestTime >= 2000)) {
-    Serial.println("[RESTART-FIX] Executing safe restart...");
+    Serial.println("[RESTART] Restarting...");
     esp_task_wdt_deinit();  // Disable watchdog to avoid TG1WDT
     vTaskDelay(pdMS_TO_TICKS(500));  // Let tasks settle
-    ESP.restart();  // Safe restart point
+    ESP.restart();
   }
 
   delay(16);

@@ -1,277 +1,173 @@
-<div align="center">
+# AssistantHub Pro
 
-# 🤖 AssistantHub Pro
+A desk assistant on an ESP32-S3. It sorts my tasks by priority, tracks habits, runs a Pomodoro timer and answers questions through the Groq API. I control it with a Telegram bot or with a small web UI in the browser. Everything runs on the chip, there is no extra server.
 
-**An ESP32-S3 desk assistant with AI, Telegram bot, Web-UI, habit tracking and more.**
+Note: the code comments, the Telegram commands and the UI texts are in German. Change them if you like.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-ESP32--S3-orange?style=for-the-badge&logo=espressif)](https://www.espressif.com/)
-[![Language](https://img.shields.io/badge/Language-Arduino%20C%2B%2B-teal?style=for-the-badge&logo=arduino)](https://www.arduino.cc/)
-[![AI](https://img.shields.io/badge/AI-Groq%20%7C%20Llama%203-purple?style=for-the-badge)](https://groq.com)
-[![Uptime](https://img.shields.io/badge/Software%20Uptime-96.4%25-brightgreen?style=for-the-badge)]()
-[![Lines](https://img.shields.io/badge/Lines%20of%20Code-3368-lightgrey?style=for-the-badge)]()
+## Features
 
-[![FreeRTOS](https://img.shields.io/badge/FreeRTOS-Dual--Core-blue?style=flat-square)](https://freertos.org)
-[![Telegram](https://img.shields.io/badge/Telegram-Bot-2CA5E0?style=flat-square&logo=telegram)](https://core.telegram.org/bots)
-[![WebSocket](https://img.shields.io/badge/WebSocket-Real--Time-green?style=flat-square)]()
-[![SPIFFS](https://img.shields.io/badge/Storage-SPIFFS-yellow?style=flat-square)]()
+- **Tasks:** every task gets a score from its type, subject weight and days until the deadline. The list is sorted by this score.
+- **AI chat:** Groq API with two modes. Quick uses Llama 3.1 8b, Deep uses Llama 3.3 70b.
+- **Telegram bot:** commands, inline keyboards and reminders at fixed times of the day.
+- **Web UI:** a single page served by the ESP32. It gets live updates through a WebSocket and can be installed as a PWA.
+- **Habits:** 6 habits with streaks. The streaks are saved in SPIFFS, so they stay after a power cut.
+- **Pomodoro:** 1 to 4 phases of 25 minutes. Phase changes show on the OLED and come as a Telegram message.
+- **OLED:** top 3 tasks, time, WiFi signal, a spinner while the AI works and a screensaver.
+- **Dual core:** core 0 does WiFi, HTTP, WebSocket and Telegram. Core 1 does the AI requests, the display and the main loop.
+- **Heap handling:** the AI requests use one persistent TLS connection. When the heap gets low or fragmented, the code frees buffers, pauses other services or falls back to the smaller model.
 
-*Built with passion, too much coffee and Claude Pro.*
+## Hardware
 
-</div>
-
----
-
-## What is AssistantHub Pro?
-
-AssistantHub Pro turns an ESP32-S3 microcontroller into a smart desk assistant. It runs 24/7, automatically prioritizes your tasks, answers questions via AI and can be controlled via Telegram as well as a browser-based Web-UI — all running locally on the chip, no server required.(Disclaimer: The whole Code is commented in german and the commands are on german too, if it bothers you: feel free to change it to whatever language you like!)
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    AssistantHub Pro                         │
-│                                                             │
-│   📱 Telegram          🌐 Web-UI (Browser)                 │
-│        ↓                      ↓                             │
-│   ┌────────────────────────────────┐                        │
-│   │        ESP32-S3 Chip           │                        │
-│   │  Core 0: Network & Telegram    │                        │
-│   │  Core 1: AI & Display & Logic  │                        │
-│   └────────────────────────────────┘                        │
-│        ↓              ↓           ↓                         │
-│   📺 OLED         💾 SPIFFS    🤖 Groq API                 │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## ✨ Features
-
-| | Feature | Description |
-|---|---|---|
-| 📋 | **Task Manager** | Automatic prioritization via a custom scoring algorithm |
-| 🤖 | **AI Chat** | Groq API – Quick Mode (Llama 3.1 8b) & Deep Mode (Llama 3.3 70b) |
-| 📱 | **Telegram Bot** | Full control via Telegram – commands, inline keyboards, daily reminders |
-| 🌐 | **Web-UI** | Responsive PWA via WebSocket – real-time updates without page reload |
-| 🏆 | **Habit Tracking** | 6 habits with streak counter, persisted via SPIFFS flash |
-| ⏱️ | **Pomodoro Timer** | 1–4 phases, OLED display + Telegram notification on phase change |
-| 📺 | **OLED Display** | Top-3 tasks, time, WiFi RSSI bar, AI spinner, screensaver |
-| 💾 | **Persistence** | Habits survive power cuts thanks to SPIFFS flash storage |
-| 🔄 | **Dual-Core** | FreeRTOS – Core 0: networking, Core 1: UI and AI logic |
-| 🛡️ | **Heap Management** | 3-tier system + persistent TLS connection (saves ~40KB RAM per request) |
-
----
-
-## 🔧 Required Hardware
-
-| Component | Notes |
+| Part | Note |
 |---|---|
-| **Heltec ESP32-S3 WiFi Kit V3** | OLED already built in ✅ |
-| Dupont Jumper Wires | Male-to-Male |
-| Breadboard | Standard 830-point |
-| **USB-C Data Cable** | ⚠️ Must be a data cable – charging-only cables won't work! |
+| Heltec WiFi Kit 32 V3 (ESP32-S3) | The OLED is on the board |
+| USB-C cable | It must be a data cable. A charge-only cable does not work. |
+| Breadboard and jumper wires | Only if you want to add LEDs |
 
-> 💡 **Lite Edition:** This version does not include LED control.
-> For the full version with RGB LEDs (breathing/blink) → branch `full-version`
+The LED code (breathing and blink effects) is in the sketch, but it is commented out.
 
----
+## Accounts and API keys
 
-## 🔑 Required APIs & Accounts
+### Groq API key (free)
 
-<details>
-<summary><b>1. Groq API Key (free)</b></summary>
+1. Make an account at [groq.com](https://groq.com).
+2. Go to `Console > API Keys > Create API Key`.
+3. I use two keys, one for the web UI and one for Telegram. Then each one has its own rate limit.
 
-1. Create an account at [groq.com](https://groq.com)
-2. Generate an API key: `Console → API Keys → Create API Key`
-3. **Two keys recommended** – one for Web-UI, one for Telegram (separate rate-limit tracking)
-4. Free daily limit: ~14,400 requests (8b model)
+### Telegram bot
 
-</details>
+1. Open Telegram and write to `@BotFather`.
+2. Send `/newbot` and follow the steps.
+3. Copy the bot token (format `123456789:AAF...`).
+4. Get your chat ID:
+   - Send `/start` to your bot once.
+   - Open `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` in the browser.
+   - The `"id"` under `"chat"` is your chat ID.
 
-<details>
-<summary><b>2. Telegram Bot</b></summary>
+### WiFi
 
-1. Open Telegram → search for `@BotFather`
-2. Send `/newbot` and follow the instructions
-3. Note your **Bot Token** (format: `123456789:AAF...`)
-4. Find your **Chat ID**:
-   - Start your bot once with `/start`
-   - Open in browser: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-   - The `"id"` value under `"chat"` is your Chat ID
+- SSID and password of your network (2.4 GHz only).
+- Optional: SSID and password of a phone hotspot. The ESP32 uses it if the first network does not connect.
 
-</details>
+## Arduino libraries
 
-<details>
-<summary><b>3. WiFi Credentials</b></summary>
+Install them with `Sketch > Include Library > Manage Libraries`:
 
-- SSID + password of your home network
-- Optional: SSID + password of a mobile hotspot as automatic fallback
-
-</details>
-
----
-
-## 📦 Required Arduino Libraries
-
-Install via `Sketch → Include Library → Manage Libraries`:
-
-| Library | Min. Version | Library Manager Name |
+| Library | Version | Name in the Library Manager |
 |---|---|---|
-| Adafruit SSD1306 | ≥ 2.5 | `Adafruit SSD1306` |
-| Adafruit GFX | ≥ 1.11 | `Adafruit GFX Library` |
-| ArduinoJson | ≥ 6.21 | `ArduinoJson` |
-| UniversalTelegramBot | ≥ 1.3 | `Universal Arduino Telegram Bot` |
-| WebSockets | ≥ 2.3 | `WebSockets` (by Markus Sattler) |
+| Adafruit SSD1306 | 2.5 or newer | `Adafruit SSD1306` |
+| Adafruit GFX | 1.11 or newer | `Adafruit GFX Library` |
+| ArduinoJson | 6.21 or newer (v6) | `ArduinoJson` |
+| UniversalTelegramBot | 1.3 or newer | `Universal Arduino Telegram Bot` |
+| WebSockets | 2.3 or newer | `WebSockets` (Markus Sattler) |
 
-**Heltec Board Manager URL** – paste under `File → Preferences → Additional Board Manager URLs`:
+Heltec board package: add this URL under `File > Preferences > Additional Board Manager URLs`:
+
 ```
 https://github.com/Heltec-Aaron-Lee/WiFi_Kit_series/releases/download/0.0.9/package_heltec_esp32_index.json
 ```
 
----
+## Setup
 
-## 🚀 Setup & Installation
+### 1. Credentials
 
-### Step 1 – Fill in your credentials
-
-Open `AssistantHubPro.ino` and replace all `YOUR_*` placeholders (around line 73–81):
+Open `AssistantHubPro.ino` and replace the `YOUR_*` values in the `KONFIGURATION` block (about line 59 to 67):
 
 ```cpp
-// ─── REQUIRED: Fill in before uploading ─────────────────────
-#define BOTtoken          "YOUR_TELEGRAM_BOT_TOKEN"   // From @BotFather
-#define CHAT_ID           "YOUR_TELEGRAM_CHAT_ID"     // Your Telegram Chat ID
-#define GROQ_API_KEY_WEB  "YOUR_GROQ_API_KEY_WEB"     // Groq key for Web-UI
-#define GROQ_API_KEY_TG   "YOUR_GROQ_API_KEY_TG"      // Groq key for Telegram
+#define BOTtoken          "YOUR_TELEGRAM_BOT_TOKEN"
+#define CHAT_ID           "YOUR_TELEGRAM_CHAT_ID"
+#define GROQ_API_KEY_WEB  "YOUR_GROQ_API_KEY_WEB"
+#define GROQ_API_KEY_TG   "YOUR_GROQ_API_KEY_TG"
 
 const char* ssid        = "YOUR_WIFI_SSID";
 const char* password    = "YOUR_WIFI_PASSWORD";
-const char* SSIDhot     = "YOUR_HOTSPOT_SSID";        // Optional fallback
+const char* SSIDhot     = "YOUR_HOTSPOT_SSID";      // optional
 const char* Passworthot = "YOUR_HOTSPOT_PASSWORD";
 ```
 
-Also enter your name (around line ~2529 and ~2676):
-```cpp
-display.println("YOUR_NAME");           // Welcome text on OLED
-"My name is YOUR_NAME. ..."             // AI prompt personalization
-```
+Your name is used in three places. Search for `YOUR_NAME`: the welcome screen on the OLED and two AI prompts.
 
-### Step 2 – Configure Arduino IDE
+### 2. Arduino IDE
 
 ```
 Board:            Heltec WiFi Kit 32 V3
 Partition Scheme: Default 4MB with spiffs
 Upload Speed:     921600
-Port:             COM port of your ESP32
+Port:             the COM port of the ESP32
 ```
 
-### Step 3 – Upload & start
+### 3. Upload
 
-```
-1. Connect ESP32 via USB-C data cable
-2. Sketch → Upload
-3. Tools → Serial Monitor (Baud: 115200)
-4. After boot: find the IP address in the log
-5. Open in browser: http://[ESP32-IP]/
-```
+1. Connect the board with the USB-C data cable.
+2. `Sketch > Upload`.
+3. Open the Serial Monitor at 115200 baud.
+4. After boot the IP address shows in the log and the bot sends it to Telegram.
+5. Open `http://<ESP32-IP>/` in the browser.
 
----
+## Telegram commands
 
-## 📱 Telegram Commands
-
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/start` | Welcome menu with quick-access buttons |
-| `/testbot` | System status: RAM, IP, tasks, WiFi |
-| `/aufgaben` | All tasks with priority score |
-| `/new` | Create new task – guided 3-step flow |
-| `/finish` | Mark task as done (inline keyboard) |
-| `/ask <question>` | Quick AI question – Llama 3.1 8b |
-| `/deep <topic>` | In-depth research – Llama 3.3 70b |
-| `/pomodoro` | Start a Pomodoro session |
-| `/checkout` | Lock Web-UI (Telegram-only mode) |
-| `/heap` | RAM diagnostics for debugging |
-| `/uptime` | Show system uptime |
-| `/restart` | Safe restart (RTOS-safe, flag-based) |
+| `/start` | Menu with buttons |
+| `/testbot` | Status: RAM, IP, tasks, web UI |
+| `/aufgaben` | All tasks with their score |
+| `/new` | Add a task in 3 steps |
+| `/finish` | Mark a task as done |
+| `/ask <question>` | Short answer, Llama 3.1 8b |
+| `/deep <topic>` | Longer answer with headings, Llama 3.3 70b |
+| `/checkout` | Lock the web UI, use only Telegram |
+| `/heap` | RAM details for debugging |
+| `/uptime` | Time since the last boot |
+| `/restart` | Restart the ESP32 after 2 seconds |
 
----
+The Pomodoro timer starts from the web UI.
 
-## 🏗️ Architecture
+## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Core 0 – Network Task          Core 1 – AI & Main Loop     │
-│  ├── WiFi Auto-Reconnect        ├── OLED Display Rendering  │
-│  ├── Telegram Polling (400ms)   ├── Pomodoro Tick           │
-│  ├── HTTP Server (Port 80)      ├── Screensaver (10s)       │
-│  ├── WebSocket Loop (Port 81)   ├── AI Execution (Groq TLS) │
-│  └── AI Response Delivery       └── Heap Management         │
-├─────────────────────────────────────────────────────────────┤
-│  SPIFFS Flash                                               │
-│  └── /habits.json  →  Habit streaks (persistent)            │
-├─────────────────────────────────────────────────────────────┤
-│  Heap Management – 3-Tier System                            │
-│  Tier 1: Free AI buffer + yield loops                       │
-│  Tier 2: Pause services (Critical TLS Mode)                 │
-│  Tier 3: Diagnostics + Degraded Mode (8b instead of 70b)    │
-└─────────────────────────────────────────────────────────────┘
+Core 0 (networkTaskLogic)        Core 1 (aiTask and loop)
+  WiFi reconnect                   AI requests to Groq (TLS)
+  HTTP server, port 80             OLED and screensaver
+  WebSocket, port 81               Pomodoro timer
+  Telegram polling, 400 ms         Heap log every 30 s
+  Delivers the AI answers
+
+SPIFFS
+  /habits.json   habit streaks
 ```
 
----
+AI requests go through one job slot (`aiJob`). The web UI or Telegram puts a job in, `aiTask` sends it to Groq, and the network task delivers the answer.
 
-## 🛠️ Troubleshooting
+The heap is the weak point, so the code checks it before each request:
 
-<details>
-<summary><b>Board not recognized</b></summary>
+1. When a job comes in with a fragmented heap, `requestAI()` uses the 8b model or fewer tokens.
+2. If the heap is low, free the cached last answer and wait so the allocator can merge free blocks.
+3. If the largest free block is below 38 KB, pause Telegram and the WebSocket until the request is done.
+4. If it is still below 38 KB, log the details and wait up to 10 seconds before the TLS request.
 
-- Use a USB-C **data cable** – charging-only cables have no data lines
-- Install CP210x VCP driver: [Silicon Labs](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers)
-- Windows: check Device Manager to see if ESP32 appears as a COM port
+## Troubleshooting
 
-</details>
+**The board is not found**
+- Use a USB-C data cable.
+- Install the [CP210x driver](https://www.silabs.com/developers/usb-to-uart-bridge-vcp-drivers).
+- On Windows, look for the COM port in the Device Manager.
 
-<details>
-<summary><b>AI requests failing (HTTP -1)</b></summary>
+**AI requests fail (HTTP -1)**
+- Check the Groq keys in the `#define` lines.
+- Look at the `[AI]` and `[AI-POST]` lines in the Serial Monitor.
+- Send `/restart` in Telegram. If that does not help, unplug the board and plug it in again.
 
-- Double-check your Groq API keys in the `#define` lines
-- Open Serial Monitor → watch for `[AI]` log lines
-- Restart the ESP32 via `/restart` in Telegram
-- If the issue persists: unplug and replug the chip
+**WiFi does not connect**
+- Check SSID and password, including upper and lower case.
+- The ESP32 only supports 2.4 GHz, not 5 GHz.
+- Add the hotspot as a fallback.
 
-</details>
+**SPIFFS errors**
+- Set `Tools > Partition Scheme > Default 4MB with spiffs`.
+- Erase the flash with `Tools > Erase Flash > All Flash Contents` and upload again.
 
-<details>
-<summary><b>WiFi not connecting</b></summary>
+## License
 
-- Check SSID and password for typos and capitalization
-- Configure the hotspot fallback as a backup network
-- ESP32 only supports 2.4 GHz networks, not 5 GHz
+MIT, see [LICENSE](LICENSE).
 
-</details>
-
-<details>
-<summary><b>SPIFFS errors</b></summary>
-
-- Set `Tools → Partition Scheme → Default 4MB with spiffs`
-- Erase flash: `Tools → Erase Flash → All Flash Contents`
-- Then re-upload the sketch
-
-</details>
-
----
-
-## 📄 License
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-MIT License – free to use, modify and redistribute with attribution to the original author.
-
----
-
-<div align="center">
-
-Built by **[Djordje Mojsilovic](https://github.com/DjordjeMojsilovic)** | 2026
-
-[![GitHub](https://img.shields.io/badge/GitHub-DjordjeMojsilovic-181717?style=flat-square&logo=github)](https://github.com/DjordjeMojsilovic)
-
-*If you find this project useful – a ⭐ means a lot!*
-
-</div>
+Made by [Djordje Mojsilovic](https://github.com/DjordjeMojsilovic), 2026.
